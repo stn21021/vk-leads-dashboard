@@ -452,6 +452,30 @@ export default function Dashboard() {
   const cold = leads.filter(l => l.status === "cold").length;
   const total = leads.length;
 
+  const productData = Object.entries(
+    leads.reduce((acc, l) => {
+      const p = l.recommendedProduct || "Неизвестно";
+      acc[p] = (acc[p] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>)
+  ).map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count);
+
+  const avgMsgsByStatus = (status: string) => {
+    const filtered = leads.filter(l => l.status === status);
+    if (!filtered.length) return 0;
+    return Math.round(filtered.reduce((s, l) => s + l.messageCount, 0) / filtered.length);
+  };
+
+  const noObjCount = leads.filter(l => l.objections.length === 0).length;
+  const withObjCount = leads.length - noObjCount;
+
+  const interestData = Object.entries(
+    leads.flatMap(l => l.interests).reduce((acc, i) => {
+      if (i) acc[i] = (acc[i] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>)
+  ).map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count).slice(0, 6);
+
   const lastSyncFormatted = cache?.lastSyncAt
     ? new Date(cache.lastSyncAt).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
     : null;
@@ -687,6 +711,99 @@ export default function Dashboard() {
                     </div>
                   </div>
                 </div>
+
+                {/* Новые метрики — вторая строка */}
+                {leads.length > 0 && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {/* Продукты */}
+                    <div className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm">
+                      <h3 className="font-bold text-slate-800 mb-4">Продукты</h3>
+                      {productData.length > 0 ? (
+                        <ResponsiveContainer width="100%" height={Math.max(120, productData.length * 36)}>
+                          <BarChart data={productData} layout="vertical" margin={{ left: 10, right: 24, top: 2, bottom: 2 }}>
+                            <XAxis type="number" tick={{ fontSize: 12 }} />
+                            <YAxis type="category" dataKey="label" width={180} tick={<YTick />} />
+                            <Tooltip />
+                            <Bar dataKey="count" radius={[0, 4, 4, 0]}>
+                              {productData.map((_, i) => (
+                                <Cell key={i} fill={i === 0 ? "#6366f1" : i === 1 ? "#818cf8" : "#a5b4fc"} />
+                              ))}
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      ) : (
+                        <p className="text-sm text-slate-400">Нет данных</p>
+                      )}
+                    </div>
+
+                    {/* Вовлечённость + возражения */}
+                    <div className="space-y-4">
+                      <div className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm">
+                        <h3 className="font-bold text-slate-800 mb-3">Вовлечённость (avg сообщений)</h3>
+                        <div className="space-y-2">
+                          {([["hot", "🔥", "text-orange-500"], ["warm", "🌤", "text-blue-500"], ["cold", "❄️", "text-slate-400"]] as const).map(([s, icon, cls]) => {
+                            const avg = avgMsgsByStatus(s);
+                            const maxAvg = Math.max(avgMsgsByStatus("hot"), avgMsgsByStatus("warm"), avgMsgsByStatus("cold"), 1);
+                            return (
+                              <div key={s}>
+                                <div className="flex justify-between text-sm mb-1">
+                                  <span className={`font-medium ${cls}`}>{icon} {s === "hot" ? "Горячие" : s === "warm" ? "Тёплые" : "Холодные"}</span>
+                                  <span className="text-slate-600 font-bold">{avg} сообщ.</span>
+                                </div>
+                                <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                                  <div className={`h-full rounded-full ${s === "hot" ? "bg-orange-400" : s === "warm" ? "bg-blue-400" : "bg-slate-300"}`}
+                                    style={{ width: `${(avg / maxAvg) * 100}%` }} />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm">
+                        <h3 className="font-bold text-slate-800 mb-3">Возражения</h3>
+                        <div className="flex gap-4 mb-3">
+                          <div className="flex-1 text-center">
+                            <div className="text-2xl font-bold text-green-500">{noObjCount}</div>
+                            <div className="text-xs text-slate-500 mt-0.5">без возражений</div>
+                          </div>
+                          <div className="flex-1 text-center">
+                            <div className="text-2xl font-bold text-red-400">{withObjCount}</div>
+                            <div className="text-xs text-slate-500 mt-0.5">с возражениями</div>
+                          </div>
+                        </div>
+                        <div className="h-2.5 bg-slate-100 rounded-full overflow-hidden flex">
+                          <div className="h-full bg-green-400 rounded-l-full transition-all"
+                            style={{ width: `${total > 0 ? (noObjCount / total) * 100 : 0}%` }} />
+                          <div className="h-full bg-red-300 rounded-r-full transition-all"
+                            style={{ width: `${total > 0 ? (withObjCount / total) * 100 : 0}%` }} />
+                        </div>
+                        <div className="text-xs text-slate-400 mt-1 text-right">
+                          {total > 0 ? Math.round((noObjCount / total) * 100) : 0}% без возражений
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Топ интересов */}
+                {interestData.length > 0 && (
+                  <div className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm">
+                    <h3 className="font-bold text-slate-800 mb-4">Топ интересов</h3>
+                    <ResponsiveContainer width="100%" height={Math.max(120, interestData.length * 36)}>
+                      <BarChart data={interestData} layout="vertical" margin={{ left: 10, right: 24, top: 2, bottom: 2 }}>
+                        <XAxis type="number" tick={{ fontSize: 12 }} />
+                        <YAxis type="category" dataKey="label" width={200} tick={<YTick />} />
+                        <Tooltip />
+                        <Bar dataKey="count" radius={[0, 4, 4, 0]}>
+                          {interestData.map((_, i) => (
+                            <Cell key={i} fill={i === 0 ? "#10b981" : i === 1 ? "#34d399" : "#6ee7b7"} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
               </div>
             )}
 
