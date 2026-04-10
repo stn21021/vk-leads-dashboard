@@ -478,11 +478,14 @@ export default function Dashboard() {
   const withObjCount = leads.length - noObjCount;
 
   const interestData = Object.entries(
-    leads.flatMap(l => l.interests).reduce((acc, i) => {
-      if (i) acc[i] = (acc[i] || 0) + 1;
+    leads.flatMap(l => l.interests).reduce((acc, raw) => {
+      if (!raw) return acc;
+      // normalize: trim + lowercase first char to merge case variants
+      const key = raw.trim().charAt(0).toLowerCase() + raw.trim().slice(1);
+      acc[key] = (acc[key] || 0) + 1;
       return acc;
     }, {} as Record<string, number>)
-  ).map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count).slice(0, 6);
+  ).map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count).slice(0, 8);
 
   const lastSyncFormatted = cache?.lastSyncAt
     ? new Date(cache.lastSyncAt).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
@@ -720,30 +723,9 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                {/* Новые метрики — вторая строка */}
+                {/* Метрики — вовлечённость и возражения */}
                 {leads.length > 0 && (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    {/* Продукты */}
-                    <div className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm">
-                      <h3 className="font-bold text-slate-800 mb-4">Продукты</h3>
-                      {productData.length > 0 ? (
-                        <ResponsiveContainer width="100%" height={Math.max(120, productData.length * 36)}>
-                          <BarChart data={productData} layout="vertical" margin={{ left: 10, right: 24, top: 2, bottom: 2 }}>
-                            <XAxis type="number" tick={{ fontSize: 12 }} />
-                            <YAxis type="category" dataKey="label" width={180} tick={<YTick />} />
-                            <Tooltip />
-                            <Bar dataKey="count" radius={[0, 4, 4, 0]}>
-                              {productData.map((_, i) => (
-                                <Cell key={i} fill={i === 0 ? "#6366f1" : i === 1 ? "#818cf8" : "#a5b4fc"} />
-                              ))}
-                            </Bar>
-                          </BarChart>
-                        </ResponsiveContainer>
-                      ) : (
-                        <p className="text-sm text-slate-400">Нет данных</p>
-                      )}
-                    </div>
-
                     {/* Вовлечённость + возражения */}
                     <div className="space-y-4">
                       <div className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm">
@@ -791,25 +773,25 @@ export default function Dashboard() {
                         </div>
                       </div>
                     </div>
-                  </div>
-                )}
 
-                {/* Топ интересов */}
-                {interestData.length > 0 && (
-                  <div className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm">
-                    <h3 className="font-bold text-slate-800 mb-4">Топ интересов</h3>
-                    <ResponsiveContainer width="100%" height={Math.max(120, interestData.length * 36)}>
-                      <BarChart data={interestData} layout="vertical" margin={{ left: 10, right: 24, top: 2, bottom: 2 }}>
-                        <XAxis type="number" tick={{ fontSize: 12 }} />
-                        <YAxis type="category" dataKey="label" width={200} tick={<YTick />} />
-                        <Tooltip />
-                        <Bar dataKey="count" radius={[0, 4, 4, 0]}>
-                          {interestData.map((_, i) => (
-                            <Cell key={i} fill={i === 0 ? "#10b981" : i === 1 ? "#34d399" : "#6ee7b7"} />
-                          ))}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
+                    {/* Топ интересов */}
+                    {interestData.length > 0 && (
+                      <div className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm">
+                        <h3 className="font-bold text-slate-800 mb-4">Топ интересов</h3>
+                        <ResponsiveContainer width="100%" height={Math.max(160, interestData.length * 36)}>
+                          <BarChart data={interestData} layout="vertical" margin={{ left: 10, right: 24, top: 2, bottom: 2 }}>
+                            <XAxis type="number" tick={{ fontSize: 12 }} />
+                            <YAxis type="category" dataKey="label" width={200} tick={<YTick />} />
+                            <Tooltip />
+                            <Bar dataKey="count" radius={[0, 4, 4, 0]}>
+                              {interestData.map((_, i) => (
+                                <Cell key={i} fill={i === 0 ? "#10b981" : i === 1 ? "#34d399" : "#6ee7b7"} />
+                              ))}
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
