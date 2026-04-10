@@ -191,7 +191,7 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [badge, setBadge] = useState<SyncBadge | null>(null);
-  const [activeTab, setActiveTab] = useState<"strategy" | "leads">("strategy");
+  const [activeTab, setActiveTab] = useState<"strategy" | "leads" | "tasks">("strategy");
   const [filterStatus, setFilterStatus] = useState<"all" | "hot" | "warm" | "cold">("all");
   const [search, setSearch] = useState("");
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -452,13 +452,21 @@ export default function Dashboard() {
   const cold = leads.filter(l => l.status === "cold").length;
   const total = leads.length;
 
+  const normalizeProduct = (raw: string): string => {
+    const s = (raw || "").toLowerCase();
+    if (s.includes("магия") || (s.includes("тела") && !s.includes("мобильн"))) return "Магия Тела";
+    if (s.includes("прыжк")) return "Прыжки";
+    if (s.includes("мобильн") || s.includes("сила мобильн")) return "Сила Мобильности";
+    return "Неизвестно";
+  };
+
   const productData = Object.entries(
     leads.reduce((acc, l) => {
-      const p = l.recommendedProduct || "Неизвестно";
+      const p = normalizeProduct(l.recommendedProduct);
       acc[p] = (acc[p] || 0) + 1;
       return acc;
     }, {} as Record<string, number>)
-  ).map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count);
+  ).map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count).filter(d => d.label !== "Неизвестно" || d.count > 0);
 
   const avgMsgsByStatus = (status: string) => {
     const filtered = leads.filter(l => l.status === status);
@@ -629,7 +637,7 @@ export default function Dashboard() {
 
             {/* Tabs */}
             <div className="flex gap-1 bg-white rounded-xl border border-slate-100 p-1 w-fit">
-              {(["strategy", "leads"] as const).map(tab => (
+              {(["strategy", "tasks", "leads"] as const).map(tab => (
                 <button
                   key={tab}
                   onClick={() => setActiveTab(tab)}
@@ -637,7 +645,7 @@ export default function Dashboard() {
                     activeTab === tab ? "bg-slate-900 text-white" : "text-slate-500 hover:text-slate-800"
                   }`}
                 >
-                  {tab === "strategy" ? "Стратегия" : `Лиды (${total})`}
+                  {tab === "strategy" ? "Стратегия" : tab === "tasks" ? `Звонки (${leads.filter(l => l.status !== "cold").length})` : `Лиды (${total})`}
                 </button>
               ))}
             </div>
@@ -809,6 +817,73 @@ export default function Dashboard() {
 
             {activeTab === "strategy" && !insights && (
               <div className="text-center py-12 text-slate-400 text-sm">Нет данных для стратегии</div>
+            )}
+
+            {/* Tasks tab */}
+            {activeTab === "tasks" && (
+              <div className="space-y-3">
+                {leads.length === 0 && (
+                  <div className="text-center py-12 text-slate-400 text-sm">Нет данных. Запустите обновление.</div>
+                )}
+                {(["hot", "warm"] as const).map(status => {
+                  const group = leads
+                    .filter(l => l.status === status)
+                    .sort((a, b) => a.objections.length - b.objections.length);
+                  if (!group.length) return null;
+                  const cfg = STATUS_CONFIG[status];
+                  const CfgIcon = cfg.icon;
+                  return (
+                    <div key={status}>
+                      <div className={`flex items-center gap-2 mb-2 mt-4 ${cfg.color}`}>
+                        <CfgIcon size={16} />
+                        <span className="font-semibold">{cfg.label} — {group.length} лидов</span>
+                      </div>
+                      <div className="space-y-2">
+                        {group.map((lead, i) => (
+                          <div key={lead.id} className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="text-slate-400 text-sm font-mono w-5 shrink-0">{i + 1}.</span>
+                                <div className="min-w-0">
+                                  <div className="font-semibold text-slate-800 truncate">{lead.userName}</div>
+                                  <div className="text-xs text-slate-400">{lead.lastDate} · {lead.messageCount} сообщ.</div>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                {lead.objections.length === 0 && (
+                                  <span className="text-xs bg-green-50 text-green-600 px-2 py-0.5 rounded-full font-medium">без возражений</span>
+                                )}
+                                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${cfg.bg} ${cfg.color}`}>{cfg.label}</span>
+                              </div>
+                            </div>
+                            <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2 text-sm">
+                              <div className="bg-slate-50 rounded-lg px-3 py-2">
+                                <div className="text-xs text-slate-400 mb-0.5 uppercase tracking-wide">Боль</div>
+                                <div className="text-slate-700">{lead.mainPain}</div>
+                              </div>
+                              <div className="bg-blue-50 rounded-lg px-3 py-2">
+                                <div className="text-xs text-slate-400 mb-0.5 uppercase tracking-wide">Продукт</div>
+                                <div className="text-blue-700 font-medium">{normalizeProduct(lead.recommendedProduct)}</div>
+                              </div>
+                              <div className={`rounded-lg px-3 py-2 ${lead.objections.length ? "bg-red-50" : "bg-green-50"}`}>
+                                <div className="text-xs text-slate-400 mb-0.5 uppercase tracking-wide">Следующий шаг</div>
+                                <div className={lead.objections.length ? "text-red-700" : "text-green-700"}>{lead.nextStep}</div>
+                              </div>
+                            </div>
+                            {lead.objections.length > 0 && (
+                              <div className="mt-2 flex flex-wrap gap-1">
+                                {lead.objections.map((o, oi) => (
+                                  <span key={oi} className="text-xs bg-red-50 text-red-500 px-2 py-0.5 rounded-full">{o}</span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             )}
 
             {/* Leads tab */}
