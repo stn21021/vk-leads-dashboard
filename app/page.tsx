@@ -1,6 +1,15 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+
+const truncate = (s: string, n = 32) => s.length > n ? s.slice(0, n) + "…" : s;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const YTick = ({ x, y, payload }: any) => (
+  <text x={x - 4} y={y} textAnchor="end" dominantBaseline="middle" fontSize={11} fill="#475569">
+    <title>{payload.value}</title>
+    {truncate(payload.value)}
+  </text>
+);
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
@@ -630,10 +639,10 @@ export default function Dashboard() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm">
                     <h3 className="font-bold text-slate-800 mb-4">Топ болей</h3>
-                    <ResponsiveContainer width="100%" height={200}>
-                      <BarChart data={insights.topPains} layout="vertical" margin={{ left: 0, right: 20 }}>
+                    <ResponsiveContainer width="100%" height={240}>
+                      <BarChart data={insights.topPains} layout="vertical" margin={{ left: 10, right: 20, top: 4, bottom: 4 }}>
                         <XAxis type="number" tick={{ fontSize: 12 }} />
-                        <YAxis type="category" dataKey="label" width={160} tick={{ fontSize: 11 }} />
+                        <YAxis type="category" dataKey="label" width={200} tick={<YTick />} />
                         <Tooltip />
                         <Bar dataKey="count" radius={[0, 4, 4, 0]}>
                           {insights.topPains.map((_, i) => (
