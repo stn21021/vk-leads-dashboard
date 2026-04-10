@@ -42,7 +42,23 @@ const PRIORITY_CONFIG = {
   education: { label: "Образование", icon: BookOpen,  color: "text-violet-600", bg: "bg-violet-50 border-violet-200",  badge: "bg-violet-100 text-violet-700" },
 };
 
-const BATCH_SIZE = 5;
+const BATCH_SIZE = 3; // smaller batches = less wasted work if one fails
+
+// Safe JSON parse — handles Vercel timeout plain-text responses
+async function safeJson(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Likely a Vercel timeout or gateway error
+    const preview = text.slice(0, 80);
+    throw new Error(
+      res.status === 504 || res.status === 502
+        ? "Превышено время ожидания сервера. Попробуйте ещё раз — часть данных уже сохранена."
+        : `Ошибка сервера (${res.status}): ${preview}`
+    );
+  }
+}
 
 // ─── Small components ─────────────────────────────────────────────────────────
 
@@ -194,10 +210,10 @@ export default function Dashboard() {
       setProgress({ step: 1, totalSteps: 3, label: "Сканирование диалогов ВКонтакте...", current: 0, total: 0, startedAt: now });
 
       const scanRes = await fetch("/api/fetch-dialogs?mode=scan");
-      const scanData = await scanRes.json();
-      if (scanData.error) throw new Error(scanData.error);
+      const scanData = await safeJson(scanRes);
+      if (scanData.error) throw new Error(scanData.error as string);
 
-      const meta: ConversationMeta[] = scanData.meta ?? [];
+      const meta: ConversationMeta[] = (scanData.meta as ConversationMeta[]) ?? [];
       const currentCache = loadCache() ?? emptyCache();
 
       // Step 2: Diff against cache
@@ -221,16 +237,17 @@ export default function Dashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ peerIds: toFetch }),
       });
-      const fetchData = await fetchRes.json();
-      if (fetchData.error) throw new Error(fetchData.error);
+      const fetchData = await safeJson(fetchRes);
+      if (fetchData.error) throw new Error(fetchData.error as string);
 
-      const dialogs = fetchData.dialogs ?? [];
+      const dialogs = (fetchData.dialogs as unknown[]) ?? [];
 
-      // Step 4: Analyze in batches of BATCH_SIZE (client-driven for real-time progress)
-      const batches = chunkArray(dialogs, BATCH_SIZE);
+      // Step 4: Analyze in batches — save to cache after EACH batch so no work is lost
+      const batches = chunkArray(dialogs as Parameters<typeof chunkArray>[0], BATCH_SIZE);
       const newLeads: LeadAnalysis[] = [];
       let processed = 0;
       const analysisStart = Date.now();
+      const workingSnapshots = { ...currentCache.dialogSnapshots };
 
       updateProgress({ step: 3, label: `Анализ Claude (0 из ${dialogs.length})...`, current: 0, total: dialogs.length, startedAt: analysisStart });
 
@@ -240,33 +257,49 @@ export default function Dashboard() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ dialogs: batch }),
         });
-        const analyzeData = await analyzeRes.json();
-        if (analyzeData.leads) newLeads.push(...analyzeData.leads);
+        const analyzeData = await safeJson(analyzeRes);
+        const batchLeads = (analyzeData.leads as LeadAnalysis[]) ?? [];
+        newLeads.push(...batchLeads);
 
-        processed += batch.length;
+        // ✅ Save partial results immediately — money not wasted on failure
+        const partialCachedLeads: CachedLead[] = batchLeads.map(l => ({
+          ...l,
+          analyzedAt: Date.now(),
+          isNew: newIds.includes(l.id),
+          isUpdated: changedIds.includes(l.id),
+        }));
+        const partialMerged = upsertLeads(currentCache.leads, [
+          ...newLeads.slice(0, -batchLeads.length).map(l => ({
+            ...l, analyzedAt: Date.now(),
+            isNew: newIds.includes(l.id), isUpdated: changedIds.includes(l.id),
+          })),
+          ...partialCachedLeads,
+        ]);
+        for (const m of meta) {
+          if (batchLeads.some(l => l.id === m.id)) {
+            workingSnapshots[m.id] = { id: m.id, messageCount: m.messageCount, lastMessageTs: m.lastMessageTs, analyzedAt: Date.now() };
+          }
+        }
+        const partialCache: DashboardCache = {
+          version: 2, lastSyncAt: Date.now(),
+          leads: partialMerged, insights: currentCache.insights,
+          dialogSnapshots: workingSnapshots,
+        };
+        saveCache(partialCache);
+        setCache(partialCache);
+
+        processed += (batch as unknown[]).length;
         const elapsed = (Date.now() - analysisStart) / 1000;
         const rate = elapsed / processed;
         const remaining = Math.max(0, Math.round(rate * (dialogs.length - processed)));
-
-        updateProgress({
-          label: `Анализ Claude (${processed} из ${dialogs.length})...`,
-          current: processed,
-          total: dialogs.length,
-          startedAt: analysisStart,
-        });
-
-        // eta stored separately in progress for display
-        setProgress(prev => prev ? { ...prev, eta: remaining } as ProgressState & { eta: number } : null);
+        setProgress(prev => prev ? { ...prev, label: `Анализ Claude (${processed} из ${dialogs.length})...`, current: processed, total: dialogs.length, eta: remaining } as ProgressState & { eta: number } : null);
       }
 
-      // Step 5: Merge with cache
+      // Step 5: Final merge
       const cachedLeadsWithFlags: CachedLead[] = newLeads.map(l => ({
-        ...l,
-        analyzedAt: Date.now(),
-        isNew: newIds.includes(l.id),
-        isUpdated: changedIds.includes(l.id),
+        ...l, analyzedAt: Date.now(),
+        isNew: newIds.includes(l.id), isUpdated: changedIds.includes(l.id),
       }));
-
       const mergedLeads = upsertLeads(currentCache.leads, cachedLeadsWithFlags);
 
       // Step 6: Re-run insights with full merged dataset
@@ -277,8 +310,8 @@ export default function Dashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ leads: mergedLeads }),
       });
-      const insightsData = await insightsRes.json();
-      if (insightsData.error) throw new Error(insightsData.error);
+      const insightsData = await safeJson(insightsRes);
+      if (insightsData.error) throw new Error(insightsData.error as string);
 
       // Step 7: Update snapshots
       const newSnapshots = { ...currentCache.dialogSnapshots };
@@ -288,12 +321,11 @@ export default function Dashboard() {
         }
       }
 
-      // Step 8: Save to localStorage
+      // Step 8: Save final state
       const newCache: DashboardCache = {
-        version: 2,
-        lastSyncAt: Date.now(),
+        version: 2, lastSyncAt: Date.now(),
         leads: mergedLeads,
-        insights: insightsData.insights,
+        insights: insightsData.insights as Insights,
         dialogSnapshots: newSnapshots,
       };
 
@@ -320,11 +352,11 @@ export default function Dashboard() {
       setProgress({ step: 1, totalSteps: 3, label: "Загрузка всех диалогов ВКонтакте...", current: 0, total: 0, startedAt: now });
 
       const fetchRes = await fetch("/api/fetch-dialogs");
-      const fetchData = await fetchRes.json();
-      if (fetchData.error) throw new Error(fetchData.error);
-      const dialogs = fetchData.dialogs ?? [];
+      const fetchData = await safeJson(fetchRes);
+      if (fetchData.error) throw new Error(fetchData.error as string);
+      const dialogs = (fetchData.dialogs as unknown[]) ?? [];
 
-      const batches = chunkArray(dialogs, BATCH_SIZE);
+      const batches = chunkArray(dialogs as Parameters<typeof chunkArray>[0], BATCH_SIZE);
       const allLeads: LeadAnalysis[] = [];
       let processed = 0;
       const analysisStart = Date.now();
@@ -337,10 +369,24 @@ export default function Dashboard() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ dialogs: batch }),
         });
-        const data = await res.json();
-        if (data.leads) allLeads.push(...data.leads);
+        const data = await safeJson(res);
+        if (data.leads) allLeads.push(...(data.leads as LeadAnalysis[]));
 
-        processed += batch.length;
+        // ✅ Save partial results after each batch
+        const partialLeads: CachedLead[] = allLeads.map(l => ({ ...l, analyzedAt: Date.now() }));
+        const partialSnapshots: DashboardCache["dialogSnapshots"] = {};
+        for (const l of partialLeads) {
+          partialSnapshots[l.id] = { id: l.id, messageCount: l.messageCount, lastMessageTs: 0, analyzedAt: Date.now() };
+        }
+        const partialCache: DashboardCache = {
+          version: 2, lastSyncAt: Date.now(),
+          leads: partialLeads, insights: null,
+          dialogSnapshots: partialSnapshots,
+        };
+        saveCache(partialCache);
+        setCache(partialCache);
+
+        processed += (batch as unknown[]).length;
         const elapsed = (Date.now() - analysisStart) / 1000;
         const rate = elapsed / processed;
         const remaining = Math.max(0, Math.round(rate * (dialogs.length - processed)));
@@ -354,21 +400,20 @@ export default function Dashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ leads: allLeads }),
       });
-      const insightsData = await insightsRes.json();
-      if (insightsData.error) throw new Error(insightsData.error);
+      const insightsData = await safeJson(insightsRes);
+      if (insightsData.error) throw new Error(insightsData.error as string);
 
       const cachedLeads: CachedLead[] = allLeads.map(l => ({ ...l, analyzedAt: Date.now() }));
       const newSnapshots: DashboardCache["dialogSnapshots"] = {};
-      // We don't have scan data here, so build minimal snapshots from dialogs
-      for (const d of dialogs) {
-        newSnapshots[d.id] = { id: d.id, messageCount: d.messageCount, lastMessageTs: 0, analyzedAt: Date.now() };
+      for (const l of allLeads) {
+        newSnapshots[l.id] = { id: l.id, messageCount: l.messageCount, lastMessageTs: 0, analyzedAt: Date.now() };
       }
 
       const newCache: DashboardCache = {
         version: 2,
         lastSyncAt: Date.now(),
         leads: cachedLeads,
-        insights: insightsData.insights,
+        insights: insightsData.insights as Insights,
         dialogSnapshots: newSnapshots,
       };
 
