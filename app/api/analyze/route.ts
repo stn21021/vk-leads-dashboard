@@ -34,7 +34,8 @@ ${dialog.text}
     messages: [{ role: "user", content: prompt }],
   });
 
-  const content = message.content[0].type === "text" ? message.content[0].text : "{}";
+  const raw = message.content[0].type === "text" ? message.content[0].text : "{}";
+  const content = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
   const analysis = JSON.parse(content);
 
   return {
