@@ -192,6 +192,7 @@ export default function Dashboard() {
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [badge, setBadge] = useState<SyncBadge | null>(null);
   const [activeTab, setActiveTab] = useState<"strategy" | "leads" | "tasks">("strategy");
+  const [msgMap, setMsgMap] = useState<Record<number, { text: string; loading: boolean }>>({});
   const [filterStatus, setFilterStatus] = useState<"all" | "hot" | "warm" | "cold">("all");
   const [search, setSearch] = useState("");
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -645,7 +646,7 @@ export default function Dashboard() {
                     activeTab === tab ? "bg-slate-900 text-white" : "text-slate-500 hover:text-slate-800"
                   }`}
                 >
-                  {tab === "strategy" ? "Стратегия" : tab === "tasks" ? `Звонки (${leads.filter(l => l.status !== "cold").length})` : `Лиды (${total})`}
+                  {tab === "strategy" ? "Стратегия" : tab === "tasks" ? `Сообщения (${leads.filter(l => l.status !== "cold").length})` : `Лиды (${total})`}
                 </button>
               ))}
             </div>
@@ -839,7 +840,9 @@ export default function Dashboard() {
                         <span className="font-semibold">{cfg.label} — {group.length} лидов</span>
                       </div>
                       <div className="space-y-2">
-                        {group.map((lead, i) => (
+                        {group.map((lead, i) => {
+                          const msgState = msgMap[lead.id];
+                          return (
                           <div key={lead.id} className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm">
                             <div className="flex items-start justify-between gap-3">
                               <div className="flex items-center gap-2 min-w-0">
@@ -877,8 +880,62 @@ export default function Dashboard() {
                                 ))}
                               </div>
                             )}
+                            {/* Generate message block */}
+                            <div className="mt-3 border-t border-slate-100 pt-3">
+                              {!msgState?.text && (
+                                <button
+                                  onClick={async () => {
+                                    setMsgMap(m => ({ ...m, [lead.id]: { text: "", loading: true } }));
+                                    try {
+                                      const res = await fetch("/api/generate-message", {
+                                        method: "POST",
+                                        headers: { "Content-Type": "application/json" },
+                                        body: JSON.stringify({ lead }),
+                                      });
+                                      const data = await res.json();
+                                      setMsgMap(m => ({ ...m, [lead.id]: { text: data.message || data.error || "Ошибка", loading: false } }));
+                                    } catch {
+                                      setMsgMap(m => ({ ...m, [lead.id]: { text: "Ошибка генерации", loading: false } }));
+                                    }
+                                  }}
+                                  disabled={msgState?.loading}
+                                  className="flex items-center gap-1.5 text-sm text-indigo-600 hover:text-indigo-800 font-medium disabled:opacity-50 transition-colors"
+                                >
+                                  <MessageSquare size={14} />
+                                  {msgState?.loading ? "Генерирую..." : "Написать сообщение"}
+                                </button>
+                              )}
+                              {msgState?.text && (
+                                <div>
+                                  <div className="flex items-center justify-between mb-1.5">
+                                    <span className="text-xs text-slate-400 uppercase tracking-wide">Готовое сообщение</span>
+                                    <div className="flex gap-2">
+                                      <button
+                                        onClick={() => navigator.clipboard.writeText(msgState.text)}
+                                        className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+                                      >
+                                        Скопировать
+                                      </button>
+                                      <button
+                                        onClick={() => setMsgMap(m => ({ ...m, [lead.id]: { text: "", loading: false } }))}
+                                        className="text-xs text-slate-400 hover:text-slate-600"
+                                      >
+                                        Сбросить
+                                      </button>
+                                    </div>
+                                  </div>
+                                  <textarea
+                                    readOnly
+                                    value={msgState.text}
+                                    rows={4}
+                                    className="w-full text-sm text-slate-700 bg-indigo-50 rounded-lg px-3 py-2 resize-none border-0 outline-none"
+                                  />
+                                </div>
+                              )}
+                            </div>
                           </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   );
