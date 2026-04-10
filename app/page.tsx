@@ -192,7 +192,6 @@ export default function Dashboard() {
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [badge, setBadge] = useState<SyncBadge | null>(null);
   const [activeTab, setActiveTab] = useState<"strategy" | "leads" | "tasks">("strategy");
-  const [msgMap, setMsgMap] = useState<Record<number, { text: string; loading: boolean }>>({});
   const [filterStatus, setFilterStatus] = useState<"all" | "hot" | "warm" | "cold">("all");
   const [search, setSearch] = useState("");
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -840,102 +839,80 @@ export default function Dashboard() {
                         <span className="font-semibold">{cfg.label} — {group.length} лидов</span>
                       </div>
                       <div className="space-y-2">
-                        {group.map((lead, i) => {
-                          const msgState = msgMap[lead.id];
-                          return (
-                          <div key={lead.id} className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm">
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <span className="text-slate-400 text-sm font-mono w-5 shrink-0">{i + 1}.</span>
-                                <div className="min-w-0">
-                                  <div className="font-semibold text-slate-800 truncate">{lead.userName}</div>
-                                  <div className="text-xs text-slate-400">{lead.lastDate} · {lead.messageCount} сообщ.</div>
-                                </div>
+                        {group.map((lead, i) => (
+                          <div key={lead.id} className="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden">
+                            {/* Header */}
+                            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+                              <div className="flex items-center gap-2">
+                                <span className="text-slate-400 text-sm font-mono">{i + 1}.</span>
+                                <span className="font-semibold text-slate-800">{lead.userName}</span>
+                                <span className="text-xs text-slate-400">{lead.lastDate} · {lead.messageCount} сообщ.</span>
                               </div>
-                              <div className="flex items-center gap-2 shrink-0">
+                              <div className="flex items-center gap-2">
                                 {lead.objections.length === 0 && (
-                                  <span className="text-xs bg-green-50 text-green-600 px-2 py-0.5 rounded-full font-medium">без возражений</span>
+                                  <span className="text-xs bg-green-50 text-green-600 border border-green-200 px-2 py-0.5 rounded-full font-medium">без возражений</span>
                                 )}
-                                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${cfg.bg} ${cfg.color}`}>{cfg.label}</span>
+                                <span className={`text-xs px-2 py-0.5 rounded-full font-medium border ${cfg.pill}`}>{cfg.label}</span>
                               </div>
                             </div>
-                            <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2 text-sm">
-                              <div className="bg-slate-50 rounded-lg px-3 py-2">
-                                <div className="text-xs text-slate-400 mb-0.5 uppercase tracking-wide">Боль</div>
-                                <div className="text-slate-700">{lead.mainPain}</div>
+
+                            {/* Dosier body */}
+                            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+
+                              {/* Контекст */}
+                              <div className="md:col-span-2 bg-slate-50 rounded-lg px-3 py-2">
+                                <div className="text-xs text-slate-400 mb-1 uppercase tracking-wide font-medium">Контекст диалога</div>
+                                <div className="text-slate-700">{lead.summary}</div>
                               </div>
+
+                              {/* Боль */}
+                              <div className="bg-orange-50 rounded-lg px-3 py-2">
+                                <div className="text-xs text-orange-400 mb-1 uppercase tracking-wide font-medium">Главная боль</div>
+                                <div className="text-orange-800 font-medium">{lead.mainPain}</div>
+                              </div>
+
+                              {/* Продукт */}
                               <div className="bg-blue-50 rounded-lg px-3 py-2">
-                                <div className="text-xs text-slate-400 mb-0.5 uppercase tracking-wide">Продукт</div>
-                                <div className="text-blue-700 font-medium">{normalizeProduct(lead.recommendedProduct)}</div>
+                                <div className="text-xs text-blue-400 mb-1 uppercase tracking-wide font-medium">Предложить продукт</div>
+                                <div className="text-blue-800 font-bold">{normalizeProduct(lead.recommendedProduct)}</div>
                               </div>
-                              <div className={`rounded-lg px-3 py-2 ${lead.objections.length ? "bg-red-50" : "bg-green-50"}`}>
-                                <div className="text-xs text-slate-400 mb-0.5 uppercase tracking-wide">Следующий шаг</div>
-                                <div className={lead.objections.length ? "text-red-700" : "text-green-700"}>{lead.nextStep}</div>
-                              </div>
-                            </div>
-                            {lead.objections.length > 0 && (
-                              <div className="mt-2 flex flex-wrap gap-1">
-                                {lead.objections.map((o, oi) => (
-                                  <span key={oi} className="text-xs bg-red-50 text-red-500 px-2 py-0.5 rounded-full">{o}</span>
-                                ))}
-                              </div>
-                            )}
-                            {/* Generate message block */}
-                            <div className="mt-3 border-t border-slate-100 pt-3">
-                              {!msgState?.text && (
-                                <button
-                                  onClick={async () => {
-                                    setMsgMap(m => ({ ...m, [lead.id]: { text: "", loading: true } }));
-                                    try {
-                                      const res = await fetch("/api/generate-message", {
-                                        method: "POST",
-                                        headers: { "Content-Type": "application/json" },
-                                        body: JSON.stringify({ lead }),
-                                      });
-                                      const data = await res.json();
-                                      setMsgMap(m => ({ ...m, [lead.id]: { text: data.message || data.error || "Ошибка", loading: false } }));
-                                    } catch {
-                                      setMsgMap(m => ({ ...m, [lead.id]: { text: "Ошибка генерации", loading: false } }));
-                                    }
-                                  }}
-                                  disabled={msgState?.loading}
-                                  className="flex items-center gap-1.5 text-sm text-indigo-600 hover:text-indigo-800 font-medium disabled:opacity-50 transition-colors"
-                                >
-                                  <MessageSquare size={14} />
-                                  {msgState?.loading ? "Генерирую..." : "Написать сообщение"}
-                                </button>
-                              )}
-                              {msgState?.text && (
-                                <div>
-                                  <div className="flex items-center justify-between mb-1.5">
-                                    <span className="text-xs text-slate-400 uppercase tracking-wide">Готовое сообщение</span>
-                                    <div className="flex gap-2">
-                                      <button
-                                        onClick={() => navigator.clipboard.writeText(msgState.text)}
-                                        className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
-                                      >
-                                        Скопировать
-                                      </button>
-                                      <button
-                                        onClick={() => setMsgMap(m => ({ ...m, [lead.id]: { text: "", loading: false } }))}
-                                        className="text-xs text-slate-400 hover:text-slate-600"
-                                      >
-                                        Сбросить
-                                      </button>
-                                    </div>
+
+                              {/* Интересы */}
+                              {lead.interests.length > 0 && (
+                                <div className="bg-emerald-50 rounded-lg px-3 py-2">
+                                  <div className="text-xs text-emerald-500 mb-1.5 uppercase tracking-wide font-medium">Интересы</div>
+                                  <div className="flex flex-wrap gap-1">
+                                    {lead.interests.map((t, ti) => (
+                                      <span key={ti} className="text-xs bg-white text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full">{t}</span>
+                                    ))}
                                   </div>
-                                  <textarea
-                                    readOnly
-                                    value={msgState.text}
-                                    rows={4}
-                                    className="w-full text-sm text-slate-700 bg-indigo-50 rounded-lg px-3 py-2 resize-none border-0 outline-none"
-                                  />
                                 </div>
                               )}
+
+                              {/* Возражения */}
+                              <div className={`rounded-lg px-3 py-2 ${lead.objections.length ? "bg-red-50" : "bg-green-50"}`}>
+                                <div className={`text-xs mb-1.5 uppercase tracking-wide font-medium ${lead.objections.length ? "text-red-400" : "text-green-500"}`}>
+                                  {lead.objections.length ? "Возражения — отработать" : "Возражений нет"}
+                                </div>
+                                {lead.objections.length > 0 ? (
+                                  <div className="flex flex-wrap gap-1">
+                                    {lead.objections.map((o, oi) => (
+                                      <span key={oi} className="text-xs bg-white text-red-600 border border-red-200 px-2 py-0.5 rounded-full">{o}</span>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="text-xs text-green-700">Можно сразу переходить к офферу</div>
+                                )}
+                              </div>
+
+                              {/* Следующий шаг */}
+                              <div className="md:col-span-2 border-t border-slate-100 pt-3 flex items-start gap-2">
+                                <span className="text-slate-400 text-xs uppercase tracking-wide font-medium shrink-0 pt-0.5">Следующий шаг →</span>
+                                <span className="text-slate-800 font-medium text-sm">{lead.nextStep}</span>
+                              </div>
                             </div>
                           </div>
-                          );
-                        })}
+                        ))}
                       </div>
                     </div>
                   );
