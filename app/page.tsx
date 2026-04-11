@@ -205,10 +205,9 @@ export default function Dashboard() {
   const [showFullConfirm, setShowFullConfirm] = useState(false);
 
 
-  // Read role from cookie (non-httpOnly, set by /api/auth/verify)
+  // Fetch role from server — cookie is httpOnly so we can't read it from JS
   useEffect(() => {
-    const role = document.cookie.split("; ").find(r => r.startsWith("role="))?.split("=")[1];
-    setIsAdmin(role === "admin");
+    fetch("/api/auth/me").then(r => r.json()).then(d => setIsAdmin(d.role === "admin")).catch(() => {});
   }, []);
 
   // Hydrate from Supabase on mount

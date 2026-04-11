@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { ConversationMeta } from "@/app/lib/analyze-utils";
+import { requireAdmin } from "@/app/lib/auth-server";
 
 const VK_API_VERSION = "5.131";
 const VK_TOKEN = process.env.VK_TOKEN!;
@@ -21,6 +22,8 @@ async function vkRequest(method: string, params: Record<string, string | number>
 // GET /api/fetch-dialogs?mode=scan — fast metadata only (1 VK API call)
 // GET /api/fetch-dialogs — full fetch of all dialogs (legacy, used for full refresh)
 export async function GET(request: Request) {
+  const deny = requireAdmin(request);
+  if (deny) return deny;
   const { searchParams } = new URL(request.url);
   const mode = searchParams.get("mode");
 
@@ -75,6 +78,8 @@ export async function GET(request: Request) {
 
 // POST /api/fetch-dialogs { peerIds: number[] } — fetch history for specific dialogs only
 export async function POST(request: Request) {
+  const deny = requireAdmin(request);
+  if (deny) return deny;
   try {
     const { peerIds }: { peerIds: number[] } = await request.json();
     if (!peerIds || peerIds.length === 0) {

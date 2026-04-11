@@ -1,12 +1,15 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { PRODUCTS_CONTEXT, LeadAnalysis } from "@/app/lib/analyze-utils";
+import { requireAdmin } from "@/app/lib/auth-server";
 
 export const maxDuration = 60;
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
 export async function POST(request: Request) {
+  const deny = requireAdmin(request);
+  if (deny) return deny;
   try {
     const { leads }: { leads: LeadAnalysis[] } = await request.json();
 
