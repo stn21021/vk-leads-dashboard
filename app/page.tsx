@@ -19,13 +19,10 @@ import {
   Download, Search, RotateCcw, Trash2, CheckCircle,
   PlusCircle, Bell, X, BadgeCheck, XCircle, Calendar,
 } from "lucide-react";
+import { PipelineEntry } from "@/app/lib/pipeline";
 import {
-  PipelineEntry, loadPipeline, savePipeline, addToPipeline,
-  updatePipelineEntry, removeFromPipeline,
-} from "@/app/lib/pipeline";
-import {
-  loadCache, saveCache, clearCache, emptyCache, upsertLeads, downloadCSV,
-  CachedLead, Insights, DashboardCache,
+  emptyCache, upsertLeads, downloadCSV,
+  CachedLead, Insights, DashboardCache, loadCache,
 } from "@/app/lib/cache";
 import { diffDialogs, chunkArray, ConversationMeta, LeadAnalysis } from "@/app/lib/analyze-utils";
 
@@ -208,15 +205,60 @@ export default function Dashboard() {
   const [modalLead, setModalLead] = useState<{ id: number; userName: string; product: string; pain: string; summary: string } | null>(null);
   const [modalForm, setModalForm] = useState({ stage: "agreed" as PipelineEntry["stage"], amount: "", followUpDate: "", note: "" });
 
-  // Hydrate from localStorage on mount
+  // Hydrate from Supabase on mount
   useEffect(() => {
-    const cached = loadCache();
-    if (cached) setCache(cached);
-    setPipeline(loadPipeline());
+    async function hydrate() {
+      try {
+        const [leadsRes, snapshotsRes, insightsRes, pipelineRes] = await Promise.all([
+          fetch("/api/db/leads"),
+          fetch("/api/db/snapshots"),
+          fetch("/api/db/insights"),
+          fetch("/api/db/pipeline"),
+        ]);
+        const [leadsData, snapshotsData, insightsData, pipelineData] = await Promise.all([
+          leadsRes.json(), snapshotsRes.json(), insightsRes.json(), pipelineRes.json(),
+        ]);
+
+        // Map snake_case → camelCase from DB
+        const leads: CachedLead[] = (leadsData.leads ?? []).map((r: {
+          id: number; user_name: string; message_count: number; last_date: string;
+          status: "hot" | "warm" | "cold"; summary: string; main_pain: string;
+          interests: string[]; objections: string[]; next_step: string;
+          recommended_product: string; analyzed_at: number;
+        }) => ({
+          id: r.id, userName: r.user_name, messageCount: r.message_count,
+          lastDate: r.last_date, status: r.status, summary: r.summary,
+          mainPain: r.main_pain, interests: r.interests ?? [],
+          objections: r.objections ?? [], nextStep: r.next_step,
+          recommendedProduct: r.recommended_product, analyzedAt: r.analyzed_at,
+        }));
+
+        setCache({
+          version: 2,
+          lastSyncAt: leads.length > 0 ? Date.now() : 0,
+          leads,
+          insights: insightsData.insights ?? null,
+          dialogSnapshots: snapshotsData.snapshots ?? {},
+        });
+        setPipeline(pipelineData.entries ?? []);
+      } catch {}
+    }
+    hydrate();
   }, []);
 
   const updateProgress = useCallback((update: Partial<ProgressState>) => {
     setProgress(prev => prev ? { ...prev, ...update } : null);
+  }, []);
+
+  // Save leads + snapshots + insights to Supabase (fire-and-forget, errors non-fatal)
+  const saveToDb = useCallback(async (c: DashboardCache) => {
+    try {
+      await Promise.all([
+        fetch("/api/db/leads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ leads: c.leads }) }),
+        fetch("/api/db/snapshots", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ snapshots: c.dialogSnapshots }) }),
+        c.insights && fetch("/api/db/insights", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ insights: c.insights }) }),
+      ]);
+    } catch {}
   }, []);
 
   // ── Smart refresh (incremental) ──────────────────────────────────────────────
@@ -235,7 +277,7 @@ export default function Dashboard() {
       if (scanData.error) throw new Error(scanData.error as string);
 
       const meta: ConversationMeta[] = (scanData.meta as ConversationMeta[]) ?? [];
-      const currentCache = loadCache() ?? emptyCache();
+      const currentCache = cache ?? emptyCache();
 
       // Step 2: Diff against cache
       const { newIds, changedIds } = diffDialogs(meta, currentCache.dialogSnapshots);
@@ -306,7 +348,7 @@ export default function Dashboard() {
           leads: partialMerged, insights: currentCache.insights,
           dialogSnapshots: workingSnapshots,
         };
-        saveCache(partialCache);
+        saveToDb(partialCache);
         setCache(partialCache);
 
         processed += (batch as unknown[]).length;
@@ -350,7 +392,7 @@ export default function Dashboard() {
         dialogSnapshots: newSnapshots,
       };
 
-      saveCache(newCache);
+      saveToDb(newCache);
       setCache(newCache);
       setBadge({ newCount: newIds.length, updatedCount: changedIds.length });
     } catch (e) {
@@ -404,7 +446,7 @@ export default function Dashboard() {
           leads: partialLeads, insights: null,
           dialogSnapshots: partialSnapshots,
         };
-        saveCache(partialCache);
+        saveToDb(partialCache);
         setCache(partialCache);
 
         processed += (batch as unknown[]).length;
@@ -438,7 +480,7 @@ export default function Dashboard() {
         dialogSnapshots: newSnapshots,
       };
 
-      saveCache(newCache);
+      saveToDb(newCache);
       setCache(newCache);
       setBadge({ newCount: dialogs.length, updatedCount: 0 });
     } catch (e) {
@@ -511,28 +553,45 @@ export default function Dashboard() {
     setShowPipelineModal(true);
   };
 
-  const savePipelineModal = () => {
+  const refreshPipeline = async () => {
+    try {
+      const res = await fetch("/api/db/pipeline");
+      const data = await res.json();
+      setPipeline(data.entries ?? []);
+    } catch {}
+  };
+
+  const savePipelineModal = async () => {
     if (!modalLead) return;
-    addToPipeline({
+    const entry: PipelineEntry = {
       leadId: modalLead.id, userName: modalLead.userName, product: modalLead.product,
       pain: modalLead.pain, summary: modalLead.summary,
       stage: modalForm.stage, note: modalForm.note,
       followUpDate: modalForm.followUpDate, amount: modalForm.amount,
       addedAt: Date.now(), updatedAt: Date.now(),
+    };
+    // Optimistic update
+    setPipeline(prev => {
+      const idx = prev.findIndex(e => e.leadId === entry.leadId);
+      if (idx >= 0) { const next = [...prev]; next[idx] = entry; return next; }
+      return [entry, ...prev];
     });
-    setPipeline(loadPipeline());
     setShowPipelineModal(false);
+    await fetch("/api/db/pipeline", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entry }) });
   };
 
-  const movePipelineStage = (leadId: number, stage: PipelineEntry["stage"], closedResult?: PipelineEntry["closedResult"]) => {
-    updatePipelineEntry(leadId, { stage, ...(closedResult ? { closedResult } : {}) });
-    setPipeline(loadPipeline());
+  const movePipelineStage = async (leadId: number, stage: PipelineEntry["stage"], closedResult?: PipelineEntry["closedResult"]) => {
+    const updates = { stage, ...(closedResult ? { closedResult } : {}) };
+    setPipeline(prev => prev.map(e => e.leadId === leadId ? { ...e, ...updates } : e));
+    await fetch("/api/db/pipeline", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ leadId, updates }) });
   };
 
-  const deletePipelineEntry = (leadId: number) => {
-    removeFromPipeline(leadId);
-    setPipeline(loadPipeline());
+  const deletePipelineEntry = async (leadId: number) => {
+    setPipeline(prev => prev.filter(e => e.leadId !== leadId));
+    await fetch("/api/db/pipeline", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ leadId }) });
   };
+
+  void refreshPipeline; // used indirectly via hydrate
 
   const lastSyncFormatted = cache?.lastSyncAt
     ? new Date(cache.lastSyncAt).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
@@ -566,6 +625,13 @@ export default function Dashboard() {
             >
               <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
               {loading ? "Загрузка..." : "Обновить"}
+            </button>
+            <button
+              onClick={async () => { await fetch("/api/auth/signout", { method: "POST" }); window.location.href = "/login"; }}
+              className="text-xs text-slate-400 hover:text-slate-600 px-2 py-1 transition-colors"
+              title="Выйти"
+            >
+              Выйти
             </button>
           </div>
         </div>
@@ -1219,7 +1285,7 @@ export default function Dashboard() {
             <div className="flex gap-2">
               <button onClick={() => setShowClearConfirm(false)} className="flex-1 border border-slate-200 rounded-xl py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Отмена</button>
               <button
-                onClick={() => { clearCache(); setCache(null); setBadge(null); setShowClearConfirm(false); }}
+                onClick={() => { setCache(null); setBadge(null); setShowClearConfirm(false); }}
                 className="flex-1 bg-red-500 hover:bg-red-600 text-white rounded-xl py-2 text-sm font-medium"
               >
                 Очистить
