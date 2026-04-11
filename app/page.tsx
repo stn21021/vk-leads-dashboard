@@ -270,23 +270,42 @@ export default function Dashboard() {
   const handleRefreshStrategy = useCallback(async () => {
     if (!cache?.leads.length) return;
     setRefreshingStrategy(true);
+    setError(null);
     try {
       const insightsRes = await fetch("/api/insights", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ leads: cache.leads }),
       });
-      const { insights } = await insightsRes.json();
+      const text = await insightsRes.text();
+      let parsed: { insights?: unknown; error?: string };
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        setError(`Ошибка парсинга ответа AI. Попробуйте ещё раз.`);
+        setRefreshingStrategy(false);
+        return;
+      }
+      if (parsed.error) {
+        setError(parsed.error as string);
+        setRefreshingStrategy(false);
+        return;
+      }
+      const insights = parsed.insights;
       if (insights) {
-        setCache(prev => prev ? { ...prev, insights } : prev);
+        setCache(prev => prev ? { ...prev, insights: insights as typeof prev.insights } : prev);
         setActivePainIndex(0);
         await fetch("/api/db/insights", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ insights }),
         });
+      } else {
+        setError("AI не вернул данные стратегии. Попробуйте ещё раз.");
       }
-    } catch {}
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Неизвестная ошибка");
+    }
     setRefreshingStrategy(false);
   }, [cache]);
 
