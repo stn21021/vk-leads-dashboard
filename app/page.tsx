@@ -17,7 +17,12 @@ import {
   Flame, Cloud, Snowflake, RefreshCw, ChevronDown, ChevronUp,
   Zap, BookOpen, TrendingUp, MessageSquare, Users, Lightbulb,
   Download, Search, RotateCcw, Trash2, CheckCircle,
+  PlusCircle, Bell, X, BadgeCheck, XCircle, Calendar,
 } from "lucide-react";
+import {
+  PipelineEntry, loadPipeline, savePipeline, addToPipeline,
+  updatePipelineEntry, removeFromPipeline,
+} from "@/app/lib/pipeline";
 import {
   loadCache, saveCache, clearCache, emptyCache, upsertLeads, downloadCSV,
   CachedLead, Insights, DashboardCache,
@@ -191,16 +196,23 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [badge, setBadge] = useState<SyncBadge | null>(null);
-  const [activeTab, setActiveTab] = useState<"strategy" | "leads" | "tasks">("strategy");
+  const [activeTab, setActiveTab] = useState<"strategy" | "pipeline" | "tasks" | "leads">("strategy");
   const [filterStatus, setFilterStatus] = useState<"all" | "hot" | "warm" | "cold">("all");
   const [search, setSearch] = useState("");
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [showFullConfirm, setShowFullConfirm] = useState(false);
 
+  // Pipeline state
+  const [pipeline, setPipeline] = useState<PipelineEntry[]>([]);
+  const [showPipelineModal, setShowPipelineModal] = useState(false);
+  const [modalLead, setModalLead] = useState<{ id: number; userName: string; product: string; pain: string; summary: string } | null>(null);
+  const [modalForm, setModalForm] = useState({ stage: "agreed" as PipelineEntry["stage"], amount: "", followUpDate: "", note: "" });
+
   // Hydrate from localStorage on mount
   useEffect(() => {
     const cached = loadCache();
     if (cached) setCache(cached);
+    setPipeline(loadPipeline());
   }, []);
 
   const updateProgress = useCallback((update: Partial<ProgressState>) => {
@@ -487,6 +499,41 @@ export default function Dashboard() {
     }, {} as Record<string, number>)
   ).map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count).slice(0, 8);
 
+  const today = new Date().toISOString().slice(0, 10);
+  const overdueCount = pipeline.filter(e => e.stage !== "closed" && e.followUpDate && e.followUpDate < today).length;
+  const pipelinePotential = pipeline
+    .filter(e => e.stage !== "closed")
+    .reduce((sum, e) => sum + (parseFloat(e.amount.replace(/[^\d.]/g, "")) || 0), 0);
+
+  const openPipelineModal = (lead: { id: number; userName: string; recommendedProduct: string; mainPain: string; summary: string }) => {
+    setModalLead({ id: lead.id, userName: lead.userName, product: normalizeProduct(lead.recommendedProduct), pain: lead.mainPain, summary: lead.summary });
+    setModalForm({ stage: "agreed", amount: "", followUpDate: "", note: "" });
+    setShowPipelineModal(true);
+  };
+
+  const savePipelineModal = () => {
+    if (!modalLead) return;
+    addToPipeline({
+      leadId: modalLead.id, userName: modalLead.userName, product: modalLead.product,
+      pain: modalLead.pain, summary: modalLead.summary,
+      stage: modalForm.stage, note: modalForm.note,
+      followUpDate: modalForm.followUpDate, amount: modalForm.amount,
+      addedAt: Date.now(), updatedAt: Date.now(),
+    });
+    setPipeline(loadPipeline());
+    setShowPipelineModal(false);
+  };
+
+  const movePipelineStage = (leadId: number, stage: PipelineEntry["stage"], closedResult?: PipelineEntry["closedResult"]) => {
+    updatePipelineEntry(leadId, { stage, ...(closedResult ? { closedResult } : {}) });
+    setPipeline(loadPipeline());
+  };
+
+  const deletePipelineEntry = (leadId: number) => {
+    removeFromPipeline(leadId);
+    setPipeline(loadPipeline());
+  };
+
   const lastSyncFormatted = cache?.lastSyncAt
     ? new Date(cache.lastSyncAt).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
     : null;
@@ -640,15 +687,23 @@ export default function Dashboard() {
 
             {/* Tabs */}
             <div className="flex gap-1 bg-white rounded-xl border border-slate-100 p-1 w-fit">
-              {(["strategy", "tasks", "leads"] as const).map(tab => (
+              {(["strategy", "pipeline", "tasks", "leads"] as const).map(tab => (
                 <button
                   key={tab}
                   onClick={() => setActiveTab(tab)}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  className={`relative px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                     activeTab === tab ? "bg-slate-900 text-white" : "text-slate-500 hover:text-slate-800"
                   }`}
                 >
-                  {tab === "strategy" ? "Стратегия" : tab === "tasks" ? `Сообщения (${leads.filter(l => l.status !== "cold").length})` : `Лиды (${total})`}
+                  {tab === "strategy" ? "Стратегия"
+                    : tab === "pipeline" ? "Воронка"
+                    : tab === "tasks" ? `Сообщения (${leads.filter(l => l.status !== "cold").length})`
+                    : `Лиды (${total})`}
+                  {tab === "pipeline" && overdueCount > 0 && (
+                    <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+                      {overdueCount}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
@@ -887,14 +942,133 @@ export default function Dashboard() {
                                 )}
                               </div>
 
-                              {/* Следующий шаг */}
-                              <div className="md:col-span-2 border-t border-slate-100 pt-3 flex items-start gap-2">
-                                <span className="text-slate-400 text-xs uppercase tracking-wide font-medium shrink-0 pt-0.5">Следующий шаг →</span>
-                                <span className="text-slate-800 font-medium text-sm">{lead.nextStep}</span>
+                              {/* Следующий шаг + кнопка воронки */}
+                              <div className="md:col-span-2 border-t border-slate-100 pt-3 flex items-center justify-between gap-2">
+                                <div className="flex items-start gap-2 flex-1 min-w-0">
+                                  <span className="text-slate-400 text-xs uppercase tracking-wide font-medium shrink-0 pt-0.5">Следующий шаг →</span>
+                                  <span className="text-slate-800 font-medium text-sm">{lead.nextStep}</span>
+                                </div>
+                                <button
+                                  onClick={() => openPipelineModal(lead)}
+                                  className={`shrink-0 flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg transition-colors ${
+                                    pipeline.some(p => p.leadId === lead.id)
+                                      ? "bg-indigo-100 text-indigo-700"
+                                      : "bg-slate-100 text-slate-600 hover:bg-indigo-50 hover:text-indigo-700"
+                                  }`}
+                                >
+                                  <PlusCircle size={13} />
+                                  {pipeline.some(p => p.leadId === lead.id) ? "В воронке" : "В воронку"}
+                                </button>
                               </div>
                             </div>
                           </div>
                         ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Pipeline tab */}
+            {activeTab === "pipeline" && (
+              <div className="space-y-5">
+                {/* Summary bar */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="bg-white rounded-2xl border border-slate-100 p-4 shadow-sm text-center">
+                    <div className="text-2xl font-bold text-indigo-600">{pipeline.filter(e => e.stage === "agreed").length}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">💰 Договорились</div>
+                  </div>
+                  <div className="bg-white rounded-2xl border border-slate-100 p-4 shadow-sm text-center">
+                    <div className="text-2xl font-bold text-amber-500">{pipeline.filter(e => e.stage === "followup").length}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">🔔 Нужен дожим</div>
+                  </div>
+                  <div className="bg-white rounded-2xl border border-slate-100 p-4 shadow-sm text-center">
+                    <div className="text-2xl font-bold text-slate-400">{pipeline.filter(e => e.stage === "closed").length}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">✅ Закрыто</div>
+                  </div>
+                  <div className="bg-white rounded-2xl border border-slate-100 p-4 shadow-sm text-center">
+                    <div className="text-2xl font-bold text-green-600">{pipelinePotential > 0 ? pipelinePotential.toLocaleString("ru-RU") + " ₽" : "—"}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">Потенциал</div>
+                  </div>
+                </div>
+
+                {pipeline.length === 0 && (
+                  <div className="text-center py-16 text-slate-400 text-sm">
+                    <Users size={32} className="mx-auto mb-3 opacity-30" />
+                    Воронка пуста. Добавляйте лидов из таба «Сообщения».
+                  </div>
+                )}
+
+                {/* Columns */}
+                {(["agreed", "followup", "closed"] as const).map(stage => {
+                  const group = pipeline.filter(e => e.stage === stage);
+                  if (!group.length) return null;
+                  const stageLabel = stage === "agreed" ? "💰 Договорился" : stage === "followup" ? "🔔 Нужен дожим" : "✅ Закрыто";
+                  return (
+                    <div key={stage}>
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="font-semibold text-slate-700">{stageLabel}</span>
+                        <span className="text-xs bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">{group.length}</span>
+                      </div>
+                      <div className="space-y-2">
+                        {group.map(entry => {
+                          const overdue = entry.followUpDate && entry.followUpDate < today && stage !== "closed";
+                          return (
+                            <div key={entry.leadId} className={`bg-white rounded-xl border shadow-sm p-4 ${overdue ? "border-red-300" : "border-slate-100"}`}>
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <div className="font-semibold text-slate-800">{entry.userName}</div>
+                                  <div className="text-xs text-slate-400 mt-0.5">{entry.product}{entry.amount ? ` · ${entry.amount} ₽` : ""}</div>
+                                </div>
+                                <button onClick={() => deletePipelineEntry(entry.leadId)} className="text-slate-300 hover:text-red-400 transition-colors shrink-0">
+                                  <X size={14} />
+                                </button>
+                              </div>
+
+                              {entry.pain && (
+                                <div className="mt-2 text-xs text-orange-700 bg-orange-50 rounded px-2 py-1">{entry.pain}</div>
+                              )}
+
+                              {entry.followUpDate && (
+                                <div className={`mt-2 flex items-center gap-1 text-xs font-medium ${overdue ? "text-red-500" : "text-slate-500"}`}>
+                                  <Calendar size={11} />
+                                  {new Date(entry.followUpDate + "T00:00:00").toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
+                                  {overdue && " — ПРОСРОЧЕНО"}
+                                </div>
+                              )}
+
+                              {entry.note && (
+                                <div className="mt-2 text-xs text-slate-600 bg-slate-50 rounded px-2 py-1">📝 {entry.note}</div>
+                              )}
+
+                              {entry.closedResult && (
+                                <div className={`mt-2 text-xs font-medium ${entry.closedResult === "paid" ? "text-green-600" : "text-slate-400"}`}>
+                                  {entry.closedResult === "paid" ? "✓ Оплатил" : "✗ Отказался"}
+                                </div>
+                              )}
+
+                              {stage !== "closed" && (
+                                <div className="mt-3 flex gap-2 flex-wrap">
+                                  {stage === "agreed" && (
+                                    <button onClick={() => movePipelineStage(entry.leadId, "followup")}
+                                      className="flex items-center gap-1 text-xs bg-amber-50 text-amber-700 border border-amber-200 px-2.5 py-1 rounded-lg hover:bg-amber-100 transition-colors">
+                                      <Bell size={11} /> Нужен дожим
+                                    </button>
+                                  )}
+                                  <button onClick={() => movePipelineStage(entry.leadId, "closed", "paid")}
+                                    className="flex items-center gap-1 text-xs bg-green-50 text-green-700 border border-green-200 px-2.5 py-1 rounded-lg hover:bg-green-100 transition-colors">
+                                    <BadgeCheck size={11} /> Оплатил
+                                  </button>
+                                  <button onClick={() => movePipelineStage(entry.leadId, "closed", "refused")}
+                                    className="flex items-center gap-1 text-xs bg-slate-50 text-slate-500 border border-slate-200 px-2.5 py-1 rounded-lg hover:bg-slate-100 transition-colors">
+                                    <XCircle size={11} /> Отказался
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   );
@@ -978,6 +1152,63 @@ export default function Dashboard() {
           </>
         )}
       </div>
+
+      {/* Pipeline modal */}
+      {showPipelineModal && modalLead && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-4">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold text-slate-800">Добавить в воронку</h3>
+              <button onClick={() => setShowPipelineModal(false)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <div className="text-xs text-slate-400 mb-1">Клиент</div>
+                <div className="text-sm font-medium text-slate-800">{modalLead.userName} — {modalLead.product}</div>
+              </div>
+              {modalLead.pain && (
+                <div className="text-xs text-orange-700 bg-orange-50 rounded px-2 py-1">{modalLead.pain}</div>
+              )}
+              <div>
+                <label className="text-xs text-slate-500 block mb-1">Стадия</label>
+                <select value={modalForm.stage} onChange={e => setModalForm(f => ({ ...f, stage: e.target.value as PipelineEntry["stage"] }))}
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-400">
+                  <option value="agreed">💰 Договорился — ждёт оплаты</option>
+                  <option value="followup">🔔 Нужен дожим</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-slate-500 block mb-1">Сумма (₽)</label>
+                <input type="text" placeholder="49900" value={modalForm.amount}
+                  onChange={e => setModalForm(f => ({ ...f, amount: e.target.value }))}
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-400" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-500 block mb-1">Дата дожима</label>
+                <input type="date" value={modalForm.followUpDate}
+                  onChange={e => setModalForm(f => ({ ...f, followUpDate: e.target.value }))}
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-400" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-500 block mb-1">Заметка</label>
+                <textarea rows={2} placeholder="Говорит, муж должен одобрить..." value={modalForm.note}
+                  onChange={e => setModalForm(f => ({ ...f, note: e.target.value }))}
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-indigo-400 resize-none" />
+              </div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <button onClick={() => setShowPipelineModal(false)}
+                className="flex-1 border border-slate-200 text-slate-600 rounded-xl py-2 text-sm font-medium hover:bg-slate-50">
+                Отмена
+              </button>
+              <button onClick={savePipelineModal}
+                className="flex-1 bg-slate-900 text-white rounded-xl py-2 text-sm font-medium hover:bg-slate-700">
+                Добавить
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Clear cache confirmation */}
       {showClearConfirm && (
