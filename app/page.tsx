@@ -282,7 +282,7 @@ export default function Dashboard() {
       try {
         parsed = JSON.parse(text);
       } catch {
-        setError(`Ошибка парсинга ответа AI. Попробуйте ещё раз.`);
+        setError(`Парсинг упал. Ответ сервера: ${text.slice(0, 200)}`);
         setRefreshingStrategy(false);
         return;
       }
