@@ -61,12 +61,15 @@ async function safeJson(res: Response): Promise<Record<string, unknown>> {
   try {
     return JSON.parse(text);
   } catch {
-    // Likely a Vercel timeout or gateway error
-    const preview = text.slice(0, 80);
+    // If the response is HTML, it's likely a redirect to the login page (session expired)
+    if (text.trimStart().startsWith("<!DOCTYPE") || text.trimStart().startsWith("<html")) {
+      window.location.href = "/login";
+      throw new Error("Сессия истекла. Перенаправляем на страницу входа...");
+    }
     throw new Error(
       res.status === 504 || res.status === 502
         ? "Превышено время ожидания сервера. Попробуйте ещё раз — часть данных уже сохранена."
-        : `Ошибка сервера (${res.status}): ${preview}`
+        : `Ошибка сервера (${res.status}): ${text.slice(0, 80)}`
     );
   }
 }
