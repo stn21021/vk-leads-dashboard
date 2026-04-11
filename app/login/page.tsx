@@ -33,7 +33,7 @@ export default function LoginPage() {
     <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4">
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-8 w-full max-w-sm">
         <div className="mb-6">
-          <h1 className="text-xl font-bold text-slate-900">Sparta Amazonky</h1>
+          <h1 className="text-xl font-bold text-slate-900">Культура движения</h1>
           <p className="text-sm text-slate-500 mt-1">Введите код доступа</p>
         </div>
 

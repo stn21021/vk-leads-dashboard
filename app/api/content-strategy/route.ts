@@ -22,7 +22,7 @@ export async function POST(request: Request) {
 
     const prompt = `${PRODUCTS_CONTEXT}
 
-Топ боли клиентов фитнес-школы Sparta Amazonky:
+Топ боли клиентов фитнес-школы Культура движения:
 ${painsText}
 
 Топ возражения:
