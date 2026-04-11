@@ -272,13 +272,23 @@ export default function Dashboard() {
     setRefreshingStrategy(true);
     setError(null);
     try {
-      const insightsRes = await fetch("/api/insights", {
+      // Aggregate pains + objections client-side — send only summaries, not all leads
+      const painMap: Record<string, number> = {};
+      const objMap: Record<string, number> = {};
+      for (const l of cache.leads) {
+        if (l.mainPain) painMap[l.mainPain] = (painMap[l.mainPain] ?? 0) + 1;
+        for (const o of l.objections ?? []) objMap[o] = (objMap[o] ?? 0) + 1;
+      }
+      const topPains = Object.entries(painMap).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([label, count]) => ({ label, count }));
+      const topObjections = Object.entries(objMap).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([label, count]) => ({ label, count }));
+
+      const res = await fetch("/api/content-strategy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ leads: cache.leads }),
+        body: JSON.stringify({ topPains, topObjections }),
       });
-      const text = await insightsRes.text();
-      let parsed: { insights?: unknown; error?: string };
+      const text = await res.text();
+      let parsed: { platformContent?: unknown; objectionContent?: unknown; error?: string };
       try {
         parsed = JSON.parse(text);
       } catch {
@@ -291,17 +301,21 @@ export default function Dashboard() {
         setRefreshingStrategy(false);
         return;
       }
-      const insights = parsed.insights;
-      if (insights) {
-        setCache(prev => prev ? { ...prev, insights: insights as typeof prev.insights } : prev);
+      if (parsed.platformContent) {
+        const updatedInsights = {
+          ...(cache.insights ?? { topPains: [], topQuestions: [], topObjections: [], contentRecommendations: [], summary: "" }),
+          platformContent: parsed.platformContent,
+          objectionContent: parsed.objectionContent ?? [],
+        };
+        setCache(prev => prev ? { ...prev, insights: updatedInsights as typeof prev.insights } : prev);
         setActivePainIndex(0);
         await fetch("/api/db/insights", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ insights }),
+          body: JSON.stringify({ insights: updatedInsights }),
         });
       } else {
-        setError("AI не вернул данные стратегии. Попробуйте ещё раз.");
+        setError("AI не вернул данные контент-стратегии. Попробуйте ещё раз.");
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Неизвестная ошибка");
