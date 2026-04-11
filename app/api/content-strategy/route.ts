@@ -24,10 +24,7 @@ export async function POST(request: Request) {
       const lines = [
         `${i + 1}. "${p.pain}" — ${p.count} чел. (горячих: ${p.hot}, тёплых: ${p.warm}, холодных: ${p.cold})`,
         p.topProduct ? `   Продукт: ${p.topProduct}` : "",
-        p.topInterests?.length ? `   Интересы: ${p.topInterests.join(", ")}` : "",
-        p.summaries?.length
-          ? `   Реальные ситуации клиентов:\n${p.summaries.map(s => `   - "${s}"`).join("\n")}`
-          : "",
+        p.topInterests?.length ? `   Интересы людей с этой болью: ${p.topInterests.join(", ")}` : "",
       ].filter(Boolean);
       return lines.join("\n");
     }).join("\n\n");

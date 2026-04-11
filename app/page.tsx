@@ -302,11 +302,7 @@ export default function Dashboard() {
             }
           }
           const topInterests = Object.entries(interestFreq).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([i]) => i);
-          const hotSummaries = group.filter(l => l.status === "hot" && l.summary).slice(0, 3).map(l => l.summary);
-          const summaries = hotSummaries.length > 0
-            ? hotSummaries
-            : group.filter(l => l.status === "warm" && l.summary).slice(0, 3).map(l => l.summary);
-          return { pain, count: group.length, hot, warm, cold, topProduct, topInterests, summaries };
+          return { pain, count: group.length, hot, warm, cold, topProduct, topInterests };
         });
       const topObjections = Object.entries(objMap)
         .sort((a, b) => b[1] - a[1])
