@@ -318,7 +318,7 @@ export default function Dashboard() {
         body: JSON.stringify({ topPains, topObjections }),
       });
       const text = await res.text();
-      let parsed: { platformContent?: unknown; objectionContent?: unknown; error?: string };
+      let parsed: { contentIdeas?: unknown; error?: string };
       try {
         parsed = JSON.parse(text);
       } catch {
@@ -331,14 +331,12 @@ export default function Dashboard() {
         setRefreshingStrategy(false);
         return;
       }
-      if (parsed.platformContent) {
+      if (parsed.contentIdeas) {
         const updatedInsights = {
-          ...(cache.insights ?? { topPains: [], topQuestions: [], topObjections: [], contentRecommendations: [], summary: "" }),
-          platformContent: parsed.platformContent,
-          objectionContent: parsed.objectionContent ?? [],
+          ...(cache.insights ?? { topPains: [], topQuestions: [], topObjections: [], contentRecommendations: [], contentIdeas: [], summary: "" }),
+          contentIdeas: parsed.contentIdeas,
         };
         setCache(prev => prev ? { ...prev, insights: updatedInsights as typeof prev.insights } : prev);
-        setActivePainIndex(0);
         await fetch("/api/db/insights", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1017,15 +1015,23 @@ export default function Dashboard() {
 
             {/* Content Strategy tab */}
             {activeTab === "content" && (() => {
-              const platformContent = insights?.platformContent ?? [];
-              const objectionContent = insights?.objectionContent ?? [];
-              const activePain = platformContent[activePainIndex];
+              const contentIdeas = insights?.contentIdeas ?? [];
+              const PLATFORM_FILTER = ["Все", "ВКонтакте", "YouTube", "Instagram"] as const;
+              type PlatformFilter = typeof PLATFORM_FILTER[number];
+              const platformFilter = (activePainIndex === 0 ? "Все" : activePainIndex === 1 ? "ВКонтакте" : activePainIndex === 2 ? "YouTube" : "Instagram") as PlatformFilter;
+              const filtered = platformFilter === "Все" ? contentIdeas : contentIdeas.filter(c => c.platform === platformFilter);
 
-              if (!insights || platformContent.length === 0) {
+              const PLATFORM_STYLE: Record<string, { badge: string; dot: string }> = {
+                "ВКонтакте": { badge: "bg-blue-100 text-blue-700", dot: "bg-blue-500" },
+                "YouTube":   { badge: "bg-red-100 text-red-700",  dot: "bg-red-500" },
+                "Instagram": { badge: "bg-purple-100 text-purple-700", dot: "bg-purple-500" },
+              };
+
+              if (!insights || contentIdeas.length === 0) {
                 return (
                   <div className="text-center py-16">
                     <Lightbulb size={32} className="mx-auto mb-3 text-slate-300" />
-                    <p className="text-slate-500 font-medium mb-1">Нет данных контент-стратегии</p>
+                    <p className="text-slate-500 font-medium mb-1">Нет данных контент-плана</p>
                     <p className="text-sm text-slate-400 mb-4">
                       {cache?.leads.length ? "Нажмите «Обновить стратегию» чтобы сгенерировать идеи" : "Сначала загрузите лидов через «Обновить данные»"}
                     </p>
@@ -1044,12 +1050,12 @@ export default function Dashboard() {
               }
 
               return (
-                <div className="space-y-6">
+                <div className="space-y-5">
                   {/* Header */}
                   <div className="flex items-center justify-between">
                     <div>
-                      <h2 className="text-lg font-bold text-slate-900">Контент-стратегия по болям</h2>
-                      <p className="text-sm text-slate-500 mt-0.5">Идеи для ВКонтакте, YouTube и Instagram на основе диалогов</p>
+                      <h2 className="text-lg font-bold text-slate-900">Контент-план</h2>
+                      <p className="text-sm text-slate-500 mt-0.5">{contentIdeas.length} идей на основе реальных болей клиентов</p>
                     </div>
                     <button
                       onClick={handleRefreshStrategy}
@@ -1057,102 +1063,56 @@ export default function Dashboard() {
                       className="flex items-center gap-2 border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50"
                     >
                       <RefreshCw size={13} className={refreshingStrategy ? "animate-spin" : ""} />
-                      {refreshingStrategy ? "Генерирую..." : "Обновить стратегию"}
+                      {refreshingStrategy ? "Генерирую..." : "Обновить"}
                     </button>
                   </div>
 
-                  {/* Pain selector pills */}
-                  <div className="flex flex-wrap gap-2">
-                    {platformContent.map((pc, i) => (
+                  {/* Platform filter */}
+                  <div className="flex gap-2">
+                    {PLATFORM_FILTER.map((p, i) => (
                       <button
-                        key={i}
+                        key={p}
                         onClick={() => setActivePainIndex(i)}
-                        className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${
+                        className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
                           activePainIndex === i
                             ? "bg-slate-900 text-white border-slate-900"
-                            : "bg-white text-slate-600 border-slate-200 hover:border-slate-400"
+                            : "bg-white text-slate-500 border-slate-200 hover:border-slate-400"
                         }`}
                       >
-                        {pc.pain}
-                        <span className={`ml-2 text-xs ${activePainIndex === i ? "text-slate-300" : "text-slate-400"}`}>
-                          {pc.leadsCount} лидов
-                        </span>
+                        {p}
+                        {p !== "Все" && (
+                          <span className="ml-1.5 text-xs opacity-60">{contentIdeas.filter(c => c.platform === p).length}</span>
+                        )}
                       </button>
                     ))}
                   </div>
 
-                  {/* Platform columns */}
-                  {activePain && (
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                      {/* VK */}
-                      <div className="space-y-3">
-                        <div className="flex items-center gap-2 mb-1">
-                          <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center text-white text-xs font-bold">VK</div>
-                          <span className="font-semibold text-slate-800">ВКонтакте</span>
-                        </div>
-                        {activePain.vk.map((idea, i) => (
-                          <div key={i} className="bg-blue-50 border border-blue-200 rounded-2xl p-4">
-                            <span className="inline-block bg-blue-100 text-blue-700 text-xs font-medium px-2 py-0.5 rounded-full mb-2">{idea.format}</span>
-                            <p className="font-semibold text-slate-900 text-sm leading-snug mb-1">{idea.title}</p>
-                            <p className="text-xs text-slate-500 italic">«{idea.hook}»</p>
-                          </div>
-                        ))}
-                      </div>
-
-                      {/* YouTube */}
-                      <div className="space-y-3">
-                        <div className="flex items-center gap-2 mb-1">
-                          <div className="w-7 h-7 rounded-lg bg-red-600 flex items-center justify-center text-white text-xs font-bold">▶</div>
-                          <span className="font-semibold text-slate-800">YouTube</span>
-                        </div>
-                        {activePain.youtube.map((idea, i) => (
-                          <div key={i} className="bg-red-50 border border-red-200 rounded-2xl p-4">
-                            <span className="inline-block bg-red-100 text-red-700 text-xs font-medium px-2 py-0.5 rounded-full mb-2">{idea.format}</span>
-                            <p className="font-semibold text-slate-900 text-sm leading-snug mb-1">{idea.title}</p>
-                            <p className="text-xs text-slate-500 italic">«{idea.hook}»</p>
-                          </div>
-                        ))}
-                      </div>
-
-                      {/* Instagram */}
-                      <div className="space-y-3">
-                        <div className="flex items-center gap-2 mb-1">
-                          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-white text-xs font-bold">In</div>
-                          <span className="font-semibold text-slate-800">Instagram</span>
-                        </div>
-                        {activePain.instagram.map((idea, i) => (
-                          <div key={i} className="bg-purple-50 border border-purple-200 rounded-2xl p-4">
-                            <span className="inline-block bg-purple-100 text-purple-700 text-xs font-medium px-2 py-0.5 rounded-full mb-2">{idea.format}</span>
-                            <p className="font-semibold text-slate-900 text-sm leading-snug mb-1">{idea.title}</p>
-                            <p className="text-xs text-slate-500 italic">«{idea.hook}»</p>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Objection content */}
-                  {objectionContent.length > 0 && (
-                    <div>
-                      <h3 className="font-semibold text-slate-800 mb-3">Работа с возражениями в контенте</h3>
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        {objectionContent.map((oc, i) => (
-                          <div key={i} className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
-                            <div className="flex items-start justify-between mb-2">
-                              <span className="text-sm font-medium text-slate-700">«{oc.objection}»</span>
-                              <span className="ml-2 shrink-0 text-xs bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">{oc.count} лидов</span>
+                  {/* Cards grid */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {filtered.map((idea, i) => {
+                      const cfg = PRIORITY_CONFIG[idea.priority];
+                      const Icon = cfg.icon;
+                      const ps = PLATFORM_STYLE[idea.platform] ?? { badge: "bg-slate-100 text-slate-600", dot: "bg-slate-400" };
+                      return (
+                        <div key={i} className={`rounded-xl border ${cfg.bg} p-4`}>
+                          <div className="flex items-start justify-between gap-2 mb-2">
+                            <div className="flex items-center gap-1.5">
+                              <Icon size={14} className={cfg.color} />
+                              <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${cfg.badge}`}>{cfg.label}</span>
                             </div>
-                            <div className="flex items-center gap-1.5 mb-2">
-                              <span className="text-xs text-slate-400">{oc.platform}</span>
-                              <span className="text-slate-300">·</span>
-                              <span className="text-xs font-medium text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full">{oc.format}</span>
-                            </div>
-                            <p className="text-sm text-slate-600 leading-snug">{oc.contentIdea}</p>
+                            <span className="text-xs text-slate-500 whitespace-nowrap shrink-0">{idea.leadsCount} лидов</span>
                           </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+                          <p className="font-semibold text-slate-800 text-sm leading-snug mb-2">{idea.title}</p>
+                          {idea.hook && <p className="text-xs text-slate-500 italic mb-3">«{idea.hook}»</p>}
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${ps.badge}`}>{idea.platform}</span>
+                            <span className="text-xs bg-white/80 border border-slate-200 rounded px-2 py-0.5 text-slate-600">{idea.format}</span>
+                            <span className="text-xs text-slate-400 truncate">Боль: {idea.pain}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               );
             })()}
