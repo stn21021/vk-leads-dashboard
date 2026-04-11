@@ -272,15 +272,49 @@ export default function Dashboard() {
     setRefreshingStrategy(true);
     setError(null);
     try {
-      // Aggregate pains + objections client-side — send only summaries, not all leads
-      const painMap: Record<string, number> = {};
+      // Aggregate pains with rich context: status breakdown, interests, summaries
+      const painGroups: Record<string, CachedLead[]> = {};
       const objMap: Record<string, number> = {};
       for (const l of cache.leads) {
-        if (l.mainPain) painMap[l.mainPain] = (painMap[l.mainPain] ?? 0) + 1;
+        if (l.mainPain) {
+          if (!painGroups[l.mainPain]) painGroups[l.mainPain] = [];
+          painGroups[l.mainPain].push(l);
+        }
         for (const o of l.objections ?? []) objMap[o] = (objMap[o] ?? 0) + 1;
       }
-      const topPains = Object.entries(painMap).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([label, count]) => ({ label, count }));
-      const topObjections = Object.entries(objMap).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([label, count]) => ({ label, count }));
+      const topPains = Object.entries(painGroups)
+        .sort((a, b) => b[1].length - a[1].length)
+        .slice(0, 4)
+        .map(([pain, group]) => {
+          const hot = group.filter(l => l.status === "hot").length;
+          const warm = group.filter(l => l.status === "warm").length;
+          const cold = group.filter(l => l.status === "cold").length;
+          const productFreq: Record<string, number> = {};
+          for (const l of group) {
+            if (l.recommendedProduct) productFreq[l.recommendedProduct] = (productFreq[l.recommendedProduct] ?? 0) + 1;
+          }
+          const topProduct = Object.entries(productFreq).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+          const interestFreq: Record<string, number> = {};
+          for (const l of group) {
+            for (const i of l.interests ?? []) {
+              const key = i.toLowerCase();
+              interestFreq[key] = (interestFreq[key] ?? 0) + 1;
+            }
+          }
+          const topInterests = Object.entries(interestFreq).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([i]) => i);
+          const hotSummaries = group.filter(l => l.status === "hot" && l.summary).slice(0, 3).map(l => l.summary);
+          const summaries = hotSummaries.length > 0
+            ? hotSummaries
+            : group.filter(l => l.status === "warm" && l.summary).slice(0, 3).map(l => l.summary);
+          return { pain, count: group.length, hot, warm, cold, topProduct, topInterests, summaries };
+        });
+      const topObjections = Object.entries(objMap)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([objection, count]) => {
+          const hot = cache.leads.filter(l => l.objections?.includes(objection) && l.status === "hot").length;
+          return { objection, count, hot };
+        });
 
       const res = await fetch("/api/content-strategy", {
         method: "POST",
