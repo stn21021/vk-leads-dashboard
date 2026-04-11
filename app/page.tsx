@@ -191,6 +191,7 @@ function ContentCard({ rec }: { rec: Insights["contentRecommendations"][0] }) {
 // ─── Main dashboard ───────────────────────────────────────────────────────────
 
 export default function Dashboard() {
+  const [isAdmin, setIsAdmin] = useState(false);
   const [cache, setCache] = useState<DashboardCache | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -209,6 +210,12 @@ export default function Dashboard() {
   const [showPipelineModal, setShowPipelineModal] = useState(false);
   const [modalLead, setModalLead] = useState<{ id: number; userName: string; product: string; pain: string; summary: string } | null>(null);
   const [modalForm, setModalForm] = useState({ stage: "agreed" as PipelineEntry["stage"], amount: "", followUpDate: "", note: "" });
+
+  // Read role from cookie (non-httpOnly, set by /api/auth/verify)
+  useEffect(() => {
+    const role = document.cookie.split("; ").find(r => r.startsWith("role="))?.split("=")[1];
+    setIsAdmin(role === "admin");
+  }, []);
 
   // Hydrate from Supabase on mount
   useEffect(() => {
@@ -699,23 +706,27 @@ export default function Dashboard() {
             <p className="text-sm text-slate-500">Анализ диалогов ВКонтакте</p>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowFullConfirm(true)}
-              disabled={loading}
-              className="flex items-center gap-2 border border-slate-200 hover:border-slate-300 disabled:opacity-40 text-slate-600 text-sm font-medium px-3 py-2 rounded-xl transition-colors"
-              title="Пересчитать все диалоги заново"
-            >
-              <RotateCcw size={14} />
-              <span className="hidden sm:inline">Пересчитать всё</span>
-            </button>
-            <button
-              onClick={handleSmartRefresh}
-              disabled={loading}
-              className="flex items-center gap-2 bg-slate-900 hover:bg-slate-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-xl transition-colors"
-            >
-              <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
-              {loading ? "Загрузка..." : "Обновить"}
-            </button>
+            {isAdmin && (
+              <>
+                <button
+                  onClick={() => setShowFullConfirm(true)}
+                  disabled={loading}
+                  className="flex items-center gap-2 border border-slate-200 hover:border-slate-300 disabled:opacity-40 text-slate-600 text-sm font-medium px-3 py-2 rounded-xl transition-colors"
+                  title="Пересчитать все диалоги заново"
+                >
+                  <RotateCcw size={14} />
+                  <span className="hidden sm:inline">Пересчитать всё</span>
+                </button>
+                <button
+                  onClick={handleSmartRefresh}
+                  disabled={loading}
+                  className="flex items-center gap-2 bg-slate-900 hover:bg-slate-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-xl transition-colors"
+                >
+                  <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
+                  {loading ? "Загрузка..." : "Обновить"}
+                </button>
+              </>
+            )}
             <button
               onClick={async () => { await fetch("/api/auth/signout", { method: "POST" }); window.location.href = "/login"; }}
               className="text-xs text-slate-400 hover:text-slate-600 px-2 py-1 transition-colors"
@@ -1035,7 +1046,7 @@ export default function Dashboard() {
                     <p className="text-sm text-slate-400 mb-4">
                       {cache?.leads.length ? "Нажмите «Обновить стратегию» чтобы сгенерировать идеи" : "Сначала загрузите лидов через «Обновить данные»"}
                     </p>
-                    {cache?.leads.length ? (
+                    {cache?.leads.length && isAdmin ? (
                       <button
                         onClick={handleRefreshStrategy}
                         disabled={refreshingStrategy}
@@ -1057,14 +1068,16 @@ export default function Dashboard() {
                       <h2 className="text-lg font-bold text-slate-900">Контент-план</h2>
                       <p className="text-sm text-slate-500 mt-0.5">{contentIdeas.length} идей на основе реальных болей клиентов</p>
                     </div>
-                    <button
-                      onClick={handleRefreshStrategy}
-                      disabled={refreshingStrategy}
-                      className="flex items-center gap-2 border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50"
-                    >
-                      <RefreshCw size={13} className={refreshingStrategy ? "animate-spin" : ""} />
-                      {refreshingStrategy ? "Генерирую..." : "Обновить"}
-                    </button>
+                    {isAdmin && (
+                      <button
+                        onClick={handleRefreshStrategy}
+                        disabled={refreshingStrategy}
+                        className="flex items-center gap-2 border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                      >
+                        <RefreshCw size={13} className={refreshingStrategy ? "animate-spin" : ""} />
+                        {refreshingStrategy ? "Генерирую..." : "Обновить"}
+                      </button>
+                    )}
                   </div>
 
                   {/* Platform filter */}
