@@ -86,12 +86,74 @@ ${leadsJson}
       "leadsCount": число
     }
   ],
+  "platformContent": [
+    {
+      "pain": "название боли (топ-1 по количеству лидов)",
+      "leadsCount": число,
+      "vk": [
+        {"format": "Клип", "title": "конкретный цепляющий заголовок для короткого видео", "hook": "первая фраза которая зацепит зрителя"},
+        {"format": "Пост", "title": "конкретный заголовок поста", "hook": "первое предложение поста"}
+      ],
+      "youtube": [
+        {"format": "Shorts", "title": "конкретный заголовок для Shorts", "hook": "первая фраза видео"},
+        {"format": "Видео", "title": "конкретный заголовок для длинного видео", "hook": "первая фраза видео"}
+      ],
+      "instagram": [
+        {"format": "Reels", "title": "конкретный заголовок для Reels", "hook": "первая фраза видео"},
+        {"format": "Карусель", "title": "конкретный заголовок для карусели", "hook": "текст первого слайда"}
+      ]
+    },
+    {
+      "pain": "название боли (топ-2)",
+      "leadsCount": число,
+      "vk": [{"format": "Клип", "title": "...", "hook": "..."}, {"format": "Пост", "title": "...", "hook": "..."}],
+      "youtube": [{"format": "Shorts", "title": "...", "hook": "..."}, {"format": "Видео", "title": "...", "hook": "..."}],
+      "instagram": [{"format": "Reels", "title": "...", "hook": "..."}, {"format": "Карусель", "title": "...", "hook": "..."}]
+    },
+    {
+      "pain": "название боли (топ-3)",
+      "leadsCount": число,
+      "vk": [{"format": "Клип", "title": "...", "hook": "..."}, {"format": "Пост", "title": "...", "hook": "..."}],
+      "youtube": [{"format": "Shorts", "title": "...", "hook": "..."}, {"format": "Видео", "title": "...", "hook": "..."}],
+      "instagram": [{"format": "Reels", "title": "...", "hook": "..."}, {"format": "Карусель", "title": "...", "hook": "..."}]
+    },
+    {
+      "pain": "название боли (топ-4)",
+      "leadsCount": число,
+      "vk": [{"format": "Клип", "title": "...", "hook": "..."}, {"format": "Пост", "title": "...", "hook": "..."}],
+      "youtube": [{"format": "Shorts", "title": "...", "hook": "..."}, {"format": "Видео", "title": "...", "hook": "..."}],
+      "instagram": [{"format": "Reels", "title": "...", "hook": "..."}, {"format": "Карусель", "title": "...", "hook": "..."}]
+    }
+  ],
+  "objectionContent": [
+    {
+      "objection": "текст возражения (топ-1)",
+      "count": число,
+      "platform": "YouTube",
+      "format": "Видео",
+      "contentIdea": "конкретная идея контента которая закрывает это возражение через обучение/кейс/доказательство"
+    },
+    {
+      "objection": "текст возражения (топ-2)",
+      "count": число,
+      "platform": "Instagram",
+      "format": "Reels",
+      "contentIdea": "..."
+    },
+    {
+      "objection": "текст возражения (топ-3)",
+      "count": число,
+      "platform": "ВКонтакте",
+      "format": "Пост",
+      "contentIdea": "..."
+    }
+  ],
   "summary": "стратегический вывод в 2-3 предложения: что сейчас важнее всего сделать с точки зрения контента и продаж"
 }`;
 
     const message = await client.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 2000,
+      max_tokens: 3500,
       messages: [{ role: "user", content: prompt }],
     });
 

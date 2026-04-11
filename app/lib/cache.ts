@@ -32,11 +32,35 @@ export interface ContentRec {
   leadsCount: number;
 }
 
+export interface PlatformIdea {
+  format: string;
+  title: string;
+  hook: string;
+}
+
+export interface PainContentPlan {
+  pain: string;
+  leadsCount: number;
+  vk: PlatformIdea[];
+  youtube: PlatformIdea[];
+  instagram: PlatformIdea[];
+}
+
+export interface ObjectionContent {
+  objection: string;
+  count: number;
+  platform: string;
+  format: string;
+  contentIdea: string;
+}
+
 export interface Insights {
   topPains: { label: string; count: number }[];
   topQuestions: { label: string; count: number }[];
   topObjections: { label: string; count: number }[];
   contentRecommendations: ContentRec[];
+  platformContent: PainContentPlan[];
+  objectionContent: ObjectionContent[];
   summary: string;
 }
 

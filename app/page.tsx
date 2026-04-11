@@ -196,7 +196,9 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [badge, setBadge] = useState<SyncBadge | null>(null);
-  const [activeTab, setActiveTab] = useState<"strategy" | "pipeline" | "tasks" | "leads">("strategy");
+  const [activeTab, setActiveTab] = useState<"strategy" | "content" | "pipeline" | "tasks" | "leads">("strategy");
+  const [activePainIndex, setActivePainIndex] = useState(0);
+  const [refreshingStrategy, setRefreshingStrategy] = useState(false);
   const [filterStatus, setFilterStatus] = useState<"all" | "hot" | "warm" | "cold">("all");
   const [search, setSearch] = useState("");
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -263,6 +265,30 @@ export default function Dashboard() {
       ]);
     } catch {}
   }, []);
+
+  // ── Refresh strategy only (no VK sync) ─────────────────────────────────────
+  const handleRefreshStrategy = useCallback(async () => {
+    if (!cache?.leads.length) return;
+    setRefreshingStrategy(true);
+    try {
+      const insightsRes = await fetch("/api/insights", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leads: cache.leads }),
+      });
+      const { insights } = await insightsRes.json();
+      if (insights) {
+        setCache(prev => prev ? { ...prev, insights } : prev);
+        setActivePainIndex(0);
+        await fetch("/api/db/insights", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ insights }),
+        });
+      }
+    } catch {}
+    setRefreshingStrategy(false);
+  }, [cache]);
 
   // ── Smart refresh (incremental) ──────────────────────────────────────────────
   const handleSmartRefresh = useCallback(async () => {
@@ -756,7 +782,7 @@ export default function Dashboard() {
 
             {/* Tabs */}
             <div className="flex gap-1 bg-white rounded-xl border border-slate-100 p-1 w-fit">
-              {(["strategy", "pipeline", "tasks", "leads"] as const).map(tab => (
+              {(["strategy", "content", "pipeline", "tasks", "leads"] as const).map(tab => (
                 <button
                   key={tab}
                   onClick={() => setActiveTab(tab)}
@@ -765,6 +791,7 @@ export default function Dashboard() {
                   }`}
                 >
                   {tab === "strategy" ? "Стратегия"
+                    : tab === "content" ? "Контент"
                     : tab === "pipeline" ? "Воронка"
                     : tab === "tasks" ? `Сообщения (${leads.filter(l => l.status !== "cold").length})`
                     : `Лиды (${total})`}
@@ -924,6 +951,148 @@ export default function Dashboard() {
             {activeTab === "strategy" && !insights && (
               <div className="text-center py-12 text-slate-400 text-sm">Нет данных для стратегии</div>
             )}
+
+            {/* Content Strategy tab */}
+            {activeTab === "content" && (() => {
+              const platformContent = insights?.platformContent ?? [];
+              const objectionContent = insights?.objectionContent ?? [];
+              const activePain = platformContent[activePainIndex];
+
+              if (!insights || platformContent.length === 0) {
+                return (
+                  <div className="text-center py-16">
+                    <Lightbulb size={32} className="mx-auto mb-3 text-slate-300" />
+                    <p className="text-slate-500 font-medium mb-1">Нет данных контент-стратегии</p>
+                    <p className="text-sm text-slate-400 mb-4">
+                      {cache?.leads.length ? "Нажмите «Обновить стратегию» чтобы сгенерировать идеи" : "Сначала загрузите лидов через «Обновить данные»"}
+                    </p>
+                    {cache?.leads.length ? (
+                      <button
+                        onClick={handleRefreshStrategy}
+                        disabled={refreshingStrategy}
+                        className="inline-flex items-center gap-2 bg-slate-900 text-white px-4 py-2 rounded-xl text-sm font-medium hover:bg-slate-700 disabled:opacity-50"
+                      >
+                        <RefreshCw size={14} className={refreshingStrategy ? "animate-spin" : ""} />
+                        {refreshingStrategy ? "Генерирую..." : "Обновить стратегию"}
+                      </button>
+                    ) : null}
+                  </div>
+                );
+              }
+
+              return (
+                <div className="space-y-6">
+                  {/* Header */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h2 className="text-lg font-bold text-slate-900">Контент-стратегия по болям</h2>
+                      <p className="text-sm text-slate-500 mt-0.5">Идеи для ВКонтакте, YouTube и Instagram на основе диалогов</p>
+                    </div>
+                    <button
+                      onClick={handleRefreshStrategy}
+                      disabled={refreshingStrategy}
+                      className="flex items-center gap-2 border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                    >
+                      <RefreshCw size={13} className={refreshingStrategy ? "animate-spin" : ""} />
+                      {refreshingStrategy ? "Генерирую..." : "Обновить стратегию"}
+                    </button>
+                  </div>
+
+                  {/* Pain selector pills */}
+                  <div className="flex flex-wrap gap-2">
+                    {platformContent.map((pc, i) => (
+                      <button
+                        key={i}
+                        onClick={() => setActivePainIndex(i)}
+                        className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${
+                          activePainIndex === i
+                            ? "bg-slate-900 text-white border-slate-900"
+                            : "bg-white text-slate-600 border-slate-200 hover:border-slate-400"
+                        }`}
+                      >
+                        {pc.pain}
+                        <span className={`ml-2 text-xs ${activePainIndex === i ? "text-slate-300" : "text-slate-400"}`}>
+                          {pc.leadsCount} лидов
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Platform columns */}
+                  {activePain && (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      {/* VK */}
+                      <div className="space-y-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center text-white text-xs font-bold">VK</div>
+                          <span className="font-semibold text-slate-800">ВКонтакте</span>
+                        </div>
+                        {activePain.vk.map((idea, i) => (
+                          <div key={i} className="bg-blue-50 border border-blue-200 rounded-2xl p-4">
+                            <span className="inline-block bg-blue-100 text-blue-700 text-xs font-medium px-2 py-0.5 rounded-full mb-2">{idea.format}</span>
+                            <p className="font-semibold text-slate-900 text-sm leading-snug mb-1">{idea.title}</p>
+                            <p className="text-xs text-slate-500 italic">«{idea.hook}»</p>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* YouTube */}
+                      <div className="space-y-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <div className="w-7 h-7 rounded-lg bg-red-600 flex items-center justify-center text-white text-xs font-bold">▶</div>
+                          <span className="font-semibold text-slate-800">YouTube</span>
+                        </div>
+                        {activePain.youtube.map((idea, i) => (
+                          <div key={i} className="bg-red-50 border border-red-200 rounded-2xl p-4">
+                            <span className="inline-block bg-red-100 text-red-700 text-xs font-medium px-2 py-0.5 rounded-full mb-2">{idea.format}</span>
+                            <p className="font-semibold text-slate-900 text-sm leading-snug mb-1">{idea.title}</p>
+                            <p className="text-xs text-slate-500 italic">«{idea.hook}»</p>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Instagram */}
+                      <div className="space-y-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-white text-xs font-bold">In</div>
+                          <span className="font-semibold text-slate-800">Instagram</span>
+                        </div>
+                        {activePain.instagram.map((idea, i) => (
+                          <div key={i} className="bg-purple-50 border border-purple-200 rounded-2xl p-4">
+                            <span className="inline-block bg-purple-100 text-purple-700 text-xs font-medium px-2 py-0.5 rounded-full mb-2">{idea.format}</span>
+                            <p className="font-semibold text-slate-900 text-sm leading-snug mb-1">{idea.title}</p>
+                            <p className="text-xs text-slate-500 italic">«{idea.hook}»</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Objection content */}
+                  {objectionContent.length > 0 && (
+                    <div>
+                      <h3 className="font-semibold text-slate-800 mb-3">Работа с возражениями в контенте</h3>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        {objectionContent.map((oc, i) => (
+                          <div key={i} className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
+                            <div className="flex items-start justify-between mb-2">
+                              <span className="text-sm font-medium text-slate-700">«{oc.objection}»</span>
+                              <span className="ml-2 shrink-0 text-xs bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">{oc.count} лидов</span>
+                            </div>
+                            <div className="flex items-center gap-1.5 mb-2">
+                              <span className="text-xs text-slate-400">{oc.platform}</span>
+                              <span className="text-slate-300">·</span>
+                              <span className="text-xs font-medium text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full">{oc.format}</span>
+                            </div>
+                            <p className="text-sm text-slate-600 leading-snug">{oc.contentIdea}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Tasks tab */}
             {activeTab === "tasks" && (
