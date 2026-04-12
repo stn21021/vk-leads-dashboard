@@ -390,18 +390,26 @@ export default function Dashboard() {
         return;
       }
 
-      // Step 3: Fetch full history for new/changed only
+      // Step 3: Fetch full history for new/changed only — in batches of 10 to avoid timeout
       updateProgress({ step: 2, label: `Загрузка ${toFetch.length} диалогов...`, current: 0, total: toFetch.length });
 
-      const fetchRes = await fetch("/api/fetch-dialogs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ peerIds: toFetch }),
-      });
-      const fetchData = await safeJson(fetchRes);
-      if (fetchData.error) throw new Error(fetchData.error as string);
+      const FETCH_BATCH = 10;
+      const fetchBatches = chunkArray(toFetch as Parameters<typeof chunkArray>[0], FETCH_BATCH);
+      const dialogs: unknown[] = [];
+      let fetchedCount = 0;
 
-      const dialogs = (fetchData.dialogs as unknown[]) ?? [];
+      for (const fetchBatch of fetchBatches) {
+        const fetchRes = await fetch("/api/fetch-dialogs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ peerIds: fetchBatch }),
+        });
+        const fetchData = await safeJson(fetchRes);
+        if (fetchData.error) throw new Error(fetchData.error as string);
+        dialogs.push(...((fetchData.dialogs as unknown[]) ?? []));
+        fetchedCount += (fetchBatch as unknown[]).length;
+        updateProgress({ step: 2, label: `Загрузка диалогов (${fetchedCount} из ${toFetch.length})...`, current: fetchedCount, total: toFetch.length });
+      }
 
       // Step 4: Analyze in batches — save to cache after EACH batch so no work is lost
       const batches = chunkArray(dialogs as Parameters<typeof chunkArray>[0], BATCH_SIZE);

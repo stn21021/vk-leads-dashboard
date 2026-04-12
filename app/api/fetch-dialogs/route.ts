@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { ConversationMeta } from "@/app/lib/analyze-utils";
 import { requireAdmin } from "@/app/lib/auth-server";
 
+export const maxDuration = 60;
+
 const VK_API_VERSION = "5.131";
 const VK_TOKEN = process.env.VK_TOKEN!;
 const VK_GROUP_ID = process.env.VK_GROUP_ID!;
