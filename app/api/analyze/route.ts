@@ -9,7 +9,7 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 async function analyzeOne(dialog: Dialog): Promise<LeadAnalysis> {
   const prompt = `${PRODUCTS_CONTEXT}
 
-ДИАЛОГ (${dialog.userName}, ${dialog.messageCount} сообщений):
+ДИАЛОГ (${dialog.userName}, ${dialog.messageCount} сообщений, последнее сообщение: ${dialog.lastDate}):
 ${dialog.text}
 
 Проанализируй этот диалог и верни JSON строго в таком формате (без markdown, только JSON):
@@ -20,17 +20,24 @@ ${dialog.text}
   "interests": ["интерес 1", "интерес 2"],
   "objections": ["возражение 1"],
   "nextStep": "конкретное следующее действие менеджера",
-  "recommendedProduct": "название продукта который лучше всего подойдёт"
+  "recommendedProduct": "название продукта который лучше всего подойдёт",
+  "paymentDate": "YYYY-MM-DD или null — дата планируемой оплаты, вычисли от ${dialog.lastDate}",
+  "paymentNote": "краткая суть обещания клиента, или null"
 }
 
 Критерии статуса:
 - hot: готов купить, спрашивает про оплату/старт, высокий интерес
 - warm: интересуется, задаёт вопросы, но не готов сразу
-- cold: пассивный интерес, много сомнений, не отвечает или просит подумать`;
+- cold: пассивный интерес, много сомнений, не отвечает или просит подумать
+
+Критерии paymentDate (ставь ТОЛЬКО если все условия выполнены):
+- клиент явно сказал "оплачу", "куплю", "переведу", "запишусь" И назвал конкретный срок ("через неделю", "в пятницу", "с зарплаты 15-го")
+- ИЛИ клиент попросил реквизиты / ссылку на оплату
+- Если срок нечёткий или обещание неуверенное — null`;
 
   const message = await client.messages.create({
     model: "claude-haiku-4-5-20251001",
-    max_tokens: 500,
+    max_tokens: 600,
     messages: [{ role: "user", content: prompt }],
   });
 

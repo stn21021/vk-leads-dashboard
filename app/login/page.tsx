@@ -43,8 +43,7 @@ export default function LoginPage() {
             value={token}
             onChange={e => setToken(e.target.value)}
             placeholder="Код доступа"
-            autoFocus
-            className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm outline-none focus:border-slate-400 transition-colors"
+            className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 placeholder:text-slate-400 outline-none focus:border-slate-500 transition-colors"
           />
 
           {error && (
@@ -53,8 +52,8 @@ export default function LoginPage() {
 
           <button
             type="submit"
-            disabled={loading || !token}
-            className="w-full bg-slate-900 text-white rounded-xl py-3 text-sm font-medium hover:bg-slate-700 disabled:opacity-50 transition-colors"
+            disabled={loading}
+            className="w-full bg-slate-900 text-white rounded-xl py-3 text-sm font-medium active:bg-slate-700 hover:bg-slate-700 disabled:opacity-50 transition-colors touch-manipulation"
           >
             {loading ? "Проверяю..." : "Войти"}
           </button>

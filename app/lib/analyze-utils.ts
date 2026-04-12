@@ -47,6 +47,8 @@ export interface LeadAnalysis {
   objections: string[];
   nextStep: string;
   recommendedProduct: string;
+  paymentDate?: string | null;
+  paymentNote?: string | null;
 }
 
 export interface ConversationMeta {

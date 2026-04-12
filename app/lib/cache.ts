@@ -22,6 +22,10 @@ export interface CachedLead {
   analyzedAt: number;
   isNew?: boolean;
   isUpdated?: boolean;
+  // Предстоящий платёж
+  paymentDate?: string | null;
+  paymentNote?: string | null;
+  paymentStatus?: "pending" | "contacted" | "paid" | "cancelled" | null;
 }
 
 export interface ContentRec {
