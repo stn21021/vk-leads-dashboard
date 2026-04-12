@@ -649,12 +649,12 @@ export default function Dashboard() {
   const pendingPaymentsCount = leads.filter(l => l.paymentDate && (!l.paymentStatus || l.paymentStatus === "pending" || l.paymentStatus === "contacted")).length;
 
   const NAV_ITEMS = [
-    { id: "strategy" as const, label: "Стратегия",  icon: "◈" },
-    { id: "content"  as const, label: "Контент",    icon: "✦" },
-    { id: "tasks"    as const, label: "Сообщения",  icon: "✉", badge: leads.filter(l => l.status !== "cold").length || undefined },
-    { id: "leads"    as const, label: "Лиды",       icon: "◉", badge: total || undefined },
+    { id: "strategy" as const, label: "Стратегия",  icon: "◈", badge: undefined as number | undefined, badgeOrange: false },
+    { id: "content"  as const, label: "Контент",    icon: "✦", badge: undefined as number | undefined, badgeOrange: false },
+    { id: "tasks"    as const, label: "Сообщения",  icon: "✉", badge: leads.filter(l => l.status !== "cold").length || undefined, badgeOrange: false },
+    { id: "leads"    as const, label: "Лиды",       icon: "◉", badge: total || undefined, badgeOrange: false },
     { id: "payments" as const, label: "Платежи",    icon: "💳", badge: pendingPaymentsCount || undefined, badgeOrange: true },
-  ] as const;
+  ];
 
   const PAGE_TITLES: Record<typeof activeTab, string> = {
     strategy: "Стратегия",
@@ -689,7 +689,7 @@ export default function Dashboard() {
             <span className="text-[14px]">{item.icon}</span>
             {item.label}
             {item.badge ? (
-              <span className="d-nav-badge" style={{ background: (item as { badgeOrange?: boolean }).badgeOrange ? "var(--accent-orange)" : "var(--text)", color: "#fff" }}>
+              <span className="d-nav-badge" style={{ background: item.badgeOrange ? "var(--accent-orange)" : "var(--text)", color: "#fff" }}>
                 {item.badge}
               </span>
             ) : null}
