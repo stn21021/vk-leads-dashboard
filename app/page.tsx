@@ -393,7 +393,7 @@ export default function Dashboard() {
       // Step 3: Fetch full history for new/changed only — in batches of 10 to avoid timeout
       updateProgress({ step: 2, label: `Загрузка ${toFetch.length} диалогов...`, current: 0, total: toFetch.length });
 
-      const FETCH_BATCH = 10;
+      const FETCH_BATCH = 20;
       const fetchBatches = chunkArray(toFetch as Parameters<typeof chunkArray>[0], FETCH_BATCH);
       const dialogs: unknown[] = [];
       let fetchedCount = 0;

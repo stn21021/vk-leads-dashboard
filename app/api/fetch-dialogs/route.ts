@@ -99,53 +99,66 @@ export async function POST(request: Request) {
 }
 
 async function fetchDialogsForPeers(peerIds: number[]) {
-  const dialogs = [];
-
-  for (const peerId of peerIds) {
-    try {
-      const histResponse = await vkRequest("messages.getHistory", {
-        group_id: VK_GROUP_ID,
-        peer_id: peerId,
-        count: 50,
-      });
-
-      const messages = histResponse.items || [];
-      if (messages.length === 0) continue;
-
-      let userName = "Неизвестный";
-      if (peerId > 0) {
-        try {
-          const usersResponse = await vkRequest("users.get", {
-            user_ids: peerId,
-            fields: "first_name,last_name",
-          });
-          if (usersResponse[0]) {
-            userName = `${usersResponse[0].first_name} ${usersResponse[0].last_name}`;
-          }
-        } catch {}
+  // 1. Fetch all histories in parallel
+  const histResults = await Promise.all(
+    peerIds.map(async (peerId) => {
+      try {
+        const histResponse = await vkRequest("messages.getHistory", {
+          group_id: VK_GROUP_ID,
+          peer_id: peerId,
+          count: 50,
+        });
+        return { peerId, messages: histResponse.items || [] };
+      } catch {
+        return { peerId, messages: [] };
       }
+    })
+  );
 
-      const text = messages
-        .reverse()
-        .map((m: { from_id: number; text: string }) => {
-          const role = m.from_id > 0 ? `Клиент (${userName})` : "Менеджер";
-          return `${role}: ${m.text}`;
-        })
-        .filter((line: string) => !line.endsWith(": "))
-        .join("\n");
+  // 2. Fetch all user names in a single batch call
+  const userPeerIds = histResults
+    .filter(r => r.messages.length > 0 && r.peerId > 0)
+    .map(r => r.peerId);
 
-      if (text.trim().length < 20) continue;
-
-      dialogs.push({
-        id: peerId,
-        userName,
-        messageCount: messages.length,
-        lastDate: messages[messages.length - 1]?.date
-          ? new Date(messages[messages.length - 1].date * 1000).toLocaleDateString("ru-RU")
-          : "",
-        text,
+  const userNames: Record<number, string> = {};
+  if (userPeerIds.length > 0) {
+    try {
+      const usersResponse = await vkRequest("users.get", {
+        user_ids: userPeerIds.join(","),
+        fields: "first_name,last_name",
       });
+      for (const u of usersResponse) {
+        userNames[u.id] = `${u.first_name} ${u.last_name}`;
+      }
     } catch {}
+  }
+
+  // 3. Assemble dialogs
+  const dialogs = [];
+  for (const { peerId, messages } of histResults) {
+    if (messages.length === 0) continue;
+    const userName = userNames[peerId] ?? "Неизвестный";
+
+    const text = messages
+      .reverse()
+      .map((m: { from_id: number; text: string }) => {
+        const role = m.from_id > 0 ? `Клиент (${userName})` : "Менеджер";
+        return `${role}: ${m.text}`;
+      })
+      .filter((line: string) => !line.endsWith(": "))
+      .join("\n");
+
+    if (text.trim().length < 20) continue;
+
+    dialogs.push({
+      id: peerId,
+      userName,
+      messageCount: messages.length,
+      lastDate: messages[messages.length - 1]?.date
+        ? new Date(messages[messages.length - 1].date * 1000).toLocaleDateString("ru-RU")
+        : "",
+      text,
+    });
   }
 
   return dialogs;
