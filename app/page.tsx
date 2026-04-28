@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 const truncate = (s: string, n = 18) => s.length > n ? s.slice(0, n) + "…" : s;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -106,8 +106,39 @@ function ProgressBar({ progress, label, eta }: { progress: number; label: string
 
 function LeadCard({ lead }: { lead: CachedLead }) {
   const [open, setOpen] = useState(false);
+  const [resurrecting, setResurrecting] = useState(false);
+  const [resurrectMsg, setResurrectMsg] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const cfg = STATUS_CONFIG[lead.status];
   const Icon = cfg.icon;
+
+  const handleResurrect = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setResurrecting(true);
+    setResurrectMsg(null);
+    try {
+      const res = await fetch("/api/generate-message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lead, mode: "resurrect" }),
+      });
+      const data = await res.json();
+      setResurrectMsg(data.message ?? data.error ?? "Ошибка");
+      if (!open) setOpen(true);
+    } catch {
+      setResurrectMsg("Ошибка генерации");
+    } finally {
+      setResurrecting(false);
+    }
+  };
+
+  const handleCopy = () => {
+    if (!resurrectMsg) return;
+    navigator.clipboard.writeText(resurrectMsg);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   return (
     <div className="d-card overflow-hidden">
       <button
@@ -121,6 +152,15 @@ function LeadCard({ lead }: { lead: CachedLead }) {
         <span className="font-medium flex-1 text-sm" style={{ color: "var(--text)" }}>{lead.userName}</span>
         {lead.isNew && <span className="text-xs bg-green-100 text-green-700 border border-green-200 rounded-full px-2 py-0.5 font-medium">новый</span>}
         {lead.isUpdated && <span className="text-xs bg-yellow-100 text-yellow-700 border border-yellow-200 rounded-full px-2 py-0.5 font-medium">обновлён</span>}
+        {lead.status === "warm" && (
+          <button
+            onClick={handleResurrect}
+            disabled={resurrecting}
+            className="text-xs px-2.5 py-1 rounded-lg border border-blue-200 text-blue-600 bg-blue-50 hover:bg-blue-100 font-medium transition-colors disabled:opacity-50 mr-1"
+          >
+            {resurrecting ? "..." : "Реанимировать"}
+          </button>
+        )}
         <span className={`flex items-center gap-1 text-xs font-medium ${cfg.color} mr-2`}>
           <Icon size={13} />{cfg.label}
         </span>
@@ -163,6 +203,22 @@ function LeadCard({ lead }: { lead: CachedLead }) {
             <p className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Рекомендуемый продукт</p>
             <p className="text-sm" style={{ color: "var(--text)" }}>{lead.recommendedProduct}</p>
           </div>
+          {resurrectMsg && (
+            <div className="md:col-span-2">
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--muted)" }}>Сообщение для реанимации</p>
+                <button
+                  onClick={handleCopy}
+                  className="text-xs px-2.5 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 font-medium transition-colors"
+                >
+                  {copied ? "✓ Скопировано" : "Копировать"}
+                </button>
+              </div>
+              <p className="text-sm rounded-lg px-3 py-2.5 leading-relaxed" style={{ background: "rgba(59,130,246,0.05)", border: "1px solid rgba(59,130,246,0.2)", color: "var(--text)" }}>
+                {resurrectMsg}
+              </p>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -195,6 +251,8 @@ function ContentCard({ rec }: { rec: Insights["contentRecommendations"][0] }) {
 export default function Dashboard() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [cache, setCache] = useState<DashboardCache | null>(null);
+  // Ref so useCallback closures always read the latest cache without needing it in deps
+  const cacheRef = useRef<DashboardCache | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProgressState | null>(null);
@@ -210,6 +268,9 @@ export default function Dashboard() {
   const [segmentGenerating, setSegmentGenerating] = useState<string | null>(null);
   const [segmentIdeas, setSegmentIdeas] = useState<Record<string, ContentIdea[]>>({});
 
+
+  // Keep ref in sync with state so useCallback closures always get the latest cache
+  useEffect(() => { cacheRef.current = cache; }, [cache]);
 
   // Fetch role from server — cookie is httpOnly so we can't read it from JS
   useEffect(() => {
@@ -375,7 +436,7 @@ export default function Dashboard() {
       if (scanData.error) throw new Error(scanData.error as string);
 
       const meta: ConversationMeta[] = (scanData.meta as ConversationMeta[]) ?? [];
-      const currentCache = cache ?? emptyCache();
+      const currentCache = cacheRef.current ?? emptyCache();
 
       // Step 2: Diff against cache
       const { newIds, changedIds } = diffDialogs(meta, currentCache.dialogSnapshots);
