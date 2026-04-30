@@ -5,6 +5,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 
 import {
   RefreshCw, BarChart2, PenLine, CalendarDays, Calendar,
   Plus, Trash2, ChevronLeft, ChevronRight, Loader2, Check, X,
+  TrendingUp, Sparkles, AlertTriangle, Target,
 } from "lucide-react";
 import {
   emptyCache, upsertLeads, loadCache, saveCache, DashboardCache, CachedLead, DialogSnapshot,
@@ -30,12 +31,26 @@ interface CalendarEntry {
   pain?: string; hook?: string; created_at: string;
 }
 
+interface ForecastAction {
+  priority: string; action: string; reason: string;
+  platform: string; expectedResult: string;
+}
+
+interface ForecastData {
+  conclusion: string; focusTopic: string; focusReason: string;
+  actions: ForecastAction[]; risks: string[];
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────────
+
+const UNKNOWN_PAINS = ["неизвестно", "неизвестна", "не определена", "не определено", "нет данных", "unknown"];
 
 function computeTopPains(leads: CachedLead[]) {
   const map = new Map<string, number>();
   for (const l of leads) {
-    if (l.mainPain) map.set(l.mainPain, (map.get(l.mainPain) || 0) + 1);
+    if (!l.mainPain) continue;
+    if (UNKNOWN_PAINS.some(u => l.mainPain.toLowerCase().includes(u))) continue;
+    map.set(l.mainPain, (map.get(l.mainPain) || 0) + 1);
   }
   return Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8)
     .map(([label, count]) => ({ label, count }));
@@ -101,6 +116,12 @@ const TYPE_LABEL: Record<string, string> = {
   warm: "Прогрев", education: "Обучение", sales: "Продажи",
 };
 
+const PRIORITY_COLOR: Record<string, string> = {
+  "высокий": "bg-orange-100 text-orange-700",
+  "средний": "bg-blue-100 text-blue-700",
+  "низкий": "bg-slate-100 text-slate-600",
+};
+
 // ─── Small components ──────────────────────────────────────────────────────────
 
 function StatCard({ label, value, color }: { label: string; value: number | string; color: string }) {
@@ -130,11 +151,16 @@ function PBar({ label, current, total }: ProgressState) {
 // ─── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Page() {
-  const [activeTab, setActiveTab] = useState<"analysis" | "create" | "plan" | "calendar">("analysis");
+  const [activeTab, setActiveTab] = useState<"analysis" | "create" | "plan" | "calendar" | "forecast">("analysis");
   const [cache, setCache] = useState<DashboardCache>(emptyCache());
   const [syncing, setSyncing] = useState(false);
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
+
+  // Analysis extras
+  const [aiSummary, setAiSummary] = useState<string | null>(null);
+  const [clusteredPains, setClusteredPains] = useState<{ label: string; count: number }[] | null>(null);
+  const [reclustering, setReclustering] = useState(false);
 
   // Create tab
   const [topic, setTopic] = useState("");
@@ -147,23 +173,31 @@ export default function Page() {
   const [generatingPlan, setGeneratingPlan] = useState(false);
   const [monthPlan, setMonthPlan] = useState<DayPlan[]>([]);
   const [planError, setPlanError] = useState<string | null>(null);
+  const [planPage, setPlanPage] = useState(0);
 
   // Calendar tab
   const [calMonth, setCalMonth] = useState(getCurrentYM());
   const [calEntries, setCalEntries] = useState<CalendarEntry[]>([]);
   const [loadingCal, setLoadingCal] = useState(false);
+  const [calError, setCalError] = useState<string | null>(null);
+
+  // Forecast tab
+  const [forecastData, setForecastData] = useState<ForecastData | null>(null);
+  const [generatingForecast, setGeneratingForecast] = useState(false);
+  const [forecastError, setForecastError] = useState<string | null>(null);
 
   // Add-to-calendar modal
   const [addModal, setAddModal] = useState<{ item: Partial<CalendarEntry> } | null>(null);
   const [addDate, setAddDate] = useState("");
   const [addTitle, setAddTitle] = useState("");
   const [addingToCalendar, setAddingToCalendar] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
 
+  // Load on mount
   useEffect(() => {
     async function init() {
       const c = loadCache();
       if (c && c.leads.length > 0) { setCache(c); return; }
-      // localStorage пустой — грузим из Supabase
       try {
         const [leadsRes, snapsRes] = await Promise.all([
           fetch("/api/db/leads"),
@@ -201,11 +235,13 @@ export default function Page() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
-  const topPains = computeTopPains(cache.leads);
+  const topPainsRaw = computeTopPains(cache.leads);
+  const topPains = clusteredPains ?? topPainsRaw;
   const topObjections = computeTopObjections(cache.leads);
   const hot = cache.leads.filter(l => l.status === "hot").length;
   const warm = cache.leads.filter(l => l.status === "warm").length;
   const cold = cache.leads.filter(l => l.status === "cold").length;
+  const unknownCount = cache.leads.filter(l => l.mainPain && UNKNOWN_PAINS.some(u => l.mainPain.toLowerCase().includes(u))).length;
 
   // ─── Sync 300 dialogs ──────────────────────────────────────────────────────
 
@@ -213,7 +249,6 @@ export default function Page() {
     setSyncing(true);
     setSyncMsg(null);
     try {
-      // 1. Scan 3 × 100 metadata
       const allMeta: ConversationMeta[] = [];
       for (let i = 0; i < 3; i++) {
         const offset = i * 100;
@@ -225,13 +260,11 @@ export default function Page() {
         if (meta.length < 100) break;
       }
 
-      // 2. Load snapshots from Supabase
       setProgress({ label: "Проверяем новые диалоги…", current: 0, total: 1 });
       const snapsRes = await fetch("/api/db/snapshots");
       const snapsData = await safeJson(snapsRes);
       const snapshots = (snapsData.snapshots || {}) as Record<number, { messageCount: number; lastMessageTs: number; analyzedAt: number }>;
 
-      // 3. Diff — only NEW (never analyzed before)
       const { newIds } = diffDialogs(allMeta, snapshots);
 
       if (newIds.length === 0) {
@@ -241,7 +274,6 @@ export default function Page() {
         return;
       }
 
-      // 4. Fetch full history for new dialogs
       setProgress({ label: `Загружаем ${newIds.length} новых диалогов…`, current: 0, total: newIds.length });
       const idChunks = chunkArray(newIds, 50);
       const allDialogs: Dialog[] = [];
@@ -255,7 +287,6 @@ export default function Page() {
         allDialogs.push(...((data.dialogs as Dialog[]) || []));
       }
 
-      // 5. Analyze in batches of 10
       const batches = chunkArray(allDialogs, 10);
       const allLeads: LeadAnalysis[] = [];
       for (let i = 0; i < batches.length; i++) {
@@ -273,7 +304,6 @@ export default function Page() {
         allLeads.push(...((data.leads as LeadAnalysis[]) || []));
       }
 
-      // 6. Save leads to Supabase
       setProgress({ label: "Сохраняем результаты…", current: 0, total: 1 });
       if (allLeads.length > 0) {
         await fetch("/api/db/leads", {
@@ -283,7 +313,6 @@ export default function Page() {
         });
       }
 
-      // 7. Save snapshots for new dialogs
       const newSnapshots: Record<number, DialogSnapshot> = {};
       for (const meta of allMeta.filter(m => newIds.includes(m.id))) {
         newSnapshots[meta.id] = { id: meta.id, messageCount: meta.messageCount, lastMessageTs: meta.lastMessageTs, analyzedAt: Date.now() };
@@ -296,7 +325,6 @@ export default function Page() {
         });
       }
 
-      // 8. Update local cache
       const newCachedLeads: CachedLead[] = allLeads.map(l => ({ ...l, analyzedAt: Date.now(), isNew: true }));
       const updatedCache: DashboardCache = {
         ...cache,
@@ -315,6 +343,34 @@ export default function Page() {
       setSyncing(false);
     }
   }, [cache]);
+
+  // ─── Recluster pains + AI summary ─────────────────────────────────────────
+
+  const handleRecluster = useCallback(async () => {
+    if (!cache.leads.length) return;
+    setReclustering(true);
+    setAiSummary(null);
+    try {
+      const res = await fetch("/api/recluster-pains", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          leads: cache.leads.map(l => ({
+            id: l.id, summary: l.summary, mainPain: l.mainPain,
+            interests: l.interests, status: l.status,
+          })),
+        }),
+      });
+      const data = await safeJson(res);
+      if (data.error) throw new Error(data.error as string);
+      if (data.pains) setClusteredPains(data.pains as { label: string; count: number }[]);
+      if (data.summary) setAiSummary(data.summary as string);
+    } catch (e) {
+      setSyncMsg(e instanceof Error ? e.message : "Ошибка анализа болей");
+    } finally {
+      setReclustering(false);
+    }
+  }, [cache.leads]);
 
   // ─── Generate custom content ───────────────────────────────────────────────
 
@@ -346,6 +402,7 @@ export default function Page() {
     setGeneratingPlan(true);
     setPlanError(null);
     setMonthPlan([]);
+    setPlanPage(0);
     try {
       const res = await fetch("/api/content-plan", {
         method: "POST",
@@ -362,15 +419,49 @@ export default function Page() {
     }
   }, [planMonth, topPains, topObjections]);
 
+  // ─── Generate forecast ─────────────────────────────────────────────────────
+
+  const handleGenerateForecast = useCallback(async () => {
+    if (!cache.leads.length) { setForecastError("Нет данных. Сначала запустите анализ."); return; }
+    setGeneratingForecast(true);
+    setForecastError(null);
+    setForecastData(null);
+    try {
+      const perfRes = await fetch("/api/db/content-performance");
+      const perfData = await safeJson(perfRes);
+      const res = await fetch("/api/forecast", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          leads: cache.leads.map(l => ({ status: l.status, mainPain: l.mainPain, summary: l.summary })),
+          topPains,
+          topObjections,
+          contentPerformance: perfData.items || [],
+        }),
+      });
+      const data = await safeJson(res);
+      if (data.error) throw new Error(data.error as string);
+      setForecastData(data as unknown as ForecastData);
+    } catch (e) {
+      setForecastError(e instanceof Error ? e.message : "Ошибка генерации прогноза");
+    } finally {
+      setGeneratingForecast(false);
+    }
+  }, [cache.leads, topPains, topObjections]);
+
   // ─── Calendar CRUD ─────────────────────────────────────────────────────────
 
   const loadCalendar = useCallback(async () => {
     setLoadingCal(true);
+    setCalError(null);
     try {
       const res = await fetch("/api/db/calendar");
       const data = await safeJson(res);
+      if (data.error) throw new Error(data.error as string);
       setCalEntries((data.entries as CalendarEntry[]) || []);
-    } catch { /* silent */ } finally {
+    } catch (e) {
+      setCalError(e instanceof Error ? e.message : "Ошибка загрузки");
+    } finally {
       setLoadingCal(false);
     }
   }, []);
@@ -379,26 +470,35 @@ export default function Page() {
     setAddModal({ item });
     setAddDate(date);
     setAddTitle(item.title || "");
+    setAddError(null);
   }, []);
 
   const handleAddToCalendar = useCallback(async () => {
     const title = addModal?.item.title || addTitle;
     if (!title.trim() || !addDate) return;
     setAddingToCalendar(true);
+    setAddError(null);
     try {
-      await fetch("/api/db/calendar", {
+      const res = await fetch("/api/db/calendar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...addModal?.item, title, scheduled_date: addDate, status: "idea" }),
       });
+      const data = await safeJson(res);
+      if (data.error) throw new Error(data.error as string);
       setAddModal(null);
       setAddDate("");
       setAddTitle("");
-      if (activeTab === "calendar") await loadCalendar();
-    } catch { /* silent */ } finally {
+      // Reload calendar entries
+      const calRes = await fetch("/api/db/calendar");
+      const calData = await safeJson(calRes);
+      setCalEntries((calData.entries as CalendarEntry[]) || []);
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : "Ошибка сохранения. Убедитесь что таблица calendar_entries создана в Supabase.");
+    } finally {
       setAddingToCalendar(false);
     }
-  }, [addModal, addTitle, addDate, activeTab, loadCalendar]);
+  }, [addModal, addTitle, addDate]);
 
   const deleteEntry = useCallback(async (id: string) => {
     await fetch("/api/db/calendar", {
@@ -425,12 +525,12 @@ export default function Page() {
     { id: "create" as const, label: "Создать контент", icon: PenLine },
     { id: "plan" as const, label: "Контент-план", icon: CalendarDays },
     { id: "calendar" as const, label: "Календарь", icon: Calendar },
+    { id: "forecast" as const, label: "Прогноз", icon: TrendingUp },
   ];
-
-  // ─── Calendar grid ─────────────────────────────────────────────────────────
 
   const calMonthEntries = calEntries.filter(e => e.scheduled_date?.startsWith(calMonth));
   const todayStr = new Date().toISOString().slice(0, 10);
+  const planPages = Math.ceil(monthPlan.length / 10);
 
   // ─── Render ────────────────────────────────────────────────────────────────
 
@@ -465,10 +565,18 @@ export default function Page() {
                   </p>
                 )}
               </div>
-              <button onClick={handleSync} disabled={syncing} className="d-btn d-btn-primary">
-                {syncing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
-                {syncing ? "Анализируем…" : "Запустить анализ"}
-              </button>
+              <div className="flex gap-2 flex-wrap">
+                {cache.leads.length > 0 && (
+                  <button onClick={handleRecluster} disabled={reclustering} className="d-btn d-btn-secondary">
+                    {reclustering ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+                    {reclustering ? "Анализируем…" : "Уточнить боли"}
+                  </button>
+                )}
+                <button onClick={handleSync} disabled={syncing} className="d-btn d-btn-primary">
+                  {syncing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                  {syncing ? "Анализируем…" : "Запустить анализ"}
+                </button>
+              </div>
             </div>
 
             {progress && <PBar {...progress} />}
@@ -492,49 +600,75 @@ export default function Page() {
                 </p>
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="d-card p-5">
-                  <p className="d-section-title">Топ болей аудитории</p>
-                  <ResponsiveContainer width="100%" height={260}>
-                    <BarChart data={topPains} layout="vertical" margin={{ left: 0, right: 20, top: 0, bottom: 0 }}>
-                      <XAxis type="number" hide />
-                      <YAxis
-                        type="category" dataKey="label" width={148}
-                        tick={{ fontSize: 11, fill: "#475569" }}
-                        tickFormatter={s => s.length > 24 ? s.slice(0, 24) + "…" : s}
-                      />
-                      <Tooltip formatter={(v) => [`${v} чел.`, "Кол-во"]} />
-                      <Bar dataKey="count" radius={4}>
-                        {topPains.map((_, i) => (
-                          <Cell key={i} fill={i === 0 ? "#f04e00" : i === 1 ? "#ff7a3d" : "#94a3b8"} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
+              <div className="space-y-4">
+                {/* AI Summary */}
+                {aiSummary && (
+                  <div className="d-summary-card">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.8px] mb-3 text-orange-400">Состояние аудитории</p>
+                    <p className="text-[13px] leading-relaxed text-white/90">{aiSummary}</p>
+                  </div>
+                )}
 
-                <div className="d-card p-5">
-                  <p className="d-section-title">Топ возражений</p>
-                  {topObjections.length === 0 ? (
-                    <p className="text-[12px] mt-2" style={{ color: "var(--muted)" }}>Нет данных</p>
-                  ) : (
-                    <div className="space-y-3 mt-2">
-                      {topObjections.map((obj, i) => (
-                        <div key={i}>
-                          <div className="flex justify-between text-[11px] mb-1">
-                            <span style={{ color: "var(--text)" }} className="truncate pr-2">{obj.label}</span>
-                            <span className="font-semibold shrink-0" style={{ color: "var(--muted)" }}>{obj.count}</span>
-                          </div>
-                          <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                            <div
-                              className="h-full rounded-full bg-slate-600"
-                              style={{ width: `${Math.min((obj.count / (topObjections[0]?.count || 1)) * 100, 100)}%` }}
-                            />
-                          </div>
-                        </div>
-                      ))}
+                {!aiSummary && unknownCount > 0 && (
+                  <div className="d-card p-4 flex items-center gap-3">
+                    <AlertTriangle size={16} className="text-orange-400 shrink-0" />
+                    <p className="text-[12px] flex-1" style={{ color: "var(--muted)" }}>
+                      У {unknownCount} из {cache.leads.length} диалогов боль не определена. Нажмите «Уточнить боли» — ИИ проанализирует саммари и восстановит реальные боли.
+                    </p>
+                    <button onClick={handleRecluster} disabled={reclustering} className="d-btn d-btn-secondary shrink-0">
+                      {reclustering ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                      Уточнить
+                    </button>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="d-card p-5">
+                    <div className="flex items-center justify-between mb-3">
+                      <p className="d-section-title" style={{ marginBottom: 0 }}>Топ болей аудитории</p>
+                      {clusteredPains && <span className="text-[10px] px-2 py-0.5 rounded-full bg-orange-50 text-orange-600 font-semibold">AI уточнено</span>}
                     </div>
-                  )}
+                    <ResponsiveContainer width="100%" height={260}>
+                      <BarChart data={topPains} layout="vertical" margin={{ left: 0, right: 20, top: 0, bottom: 0 }}>
+                        <XAxis type="number" hide />
+                        <YAxis
+                          type="category" dataKey="label" width={148}
+                          tick={{ fontSize: 11, fill: "#475569" }}
+                          tickFormatter={s => s.length > 24 ? s.slice(0, 24) + "…" : s}
+                        />
+                        <Tooltip formatter={(v) => [`${v} чел.`, "Кол-во"]} />
+                        <Bar dataKey="count" radius={4}>
+                          {topPains.map((_, i) => (
+                            <Cell key={i} fill={i === 0 ? "#f04e00" : i === 1 ? "#ff7a3d" : "#94a3b8"} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  <div className="d-card p-5">
+                    <p className="d-section-title">Топ возражений</p>
+                    {topObjections.length === 0 ? (
+                      <p className="text-[12px] mt-2" style={{ color: "var(--muted)" }}>Нет данных</p>
+                    ) : (
+                      <div className="space-y-3 mt-2">
+                        {topObjections.map((obj, i) => (
+                          <div key={i}>
+                            <div className="flex justify-between text-[11px] mb-1">
+                              <span style={{ color: "var(--text)" }} className="truncate pr-2">{obj.label}</span>
+                              <span className="font-semibold shrink-0" style={{ color: "var(--muted)" }}>{obj.count}</span>
+                            </div>
+                            <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                              <div
+                                className="h-full rounded-full bg-slate-600"
+                                style={{ width: `${Math.min((obj.count / (topObjections[0]?.count || 1)) * 100, 100)}%` }}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
@@ -610,7 +744,7 @@ export default function Page() {
                 <input
                   type="month"
                   value={planMonth}
-                  onChange={e => setPlanMonth(e.target.value)}
+                  onChange={e => { setPlanMonth(e.target.value); setMonthPlan([]); setPlanPage(0); }}
                   className="text-[12px] px-3 py-2 rounded-xl border focus:outline-none"
                   style={{ borderColor: "var(--border-solid)", background: "var(--surface-solid)" }}
                 />
@@ -633,34 +767,70 @@ export default function Page() {
               </div>
             )}
 
-            <div className="space-y-2">
-              {monthPlan.map((item, i) => (
-                <div key={i} className="d-card p-4 flex items-center gap-4">
-                  <div className="text-[22px] font-black leading-none w-8 text-center shrink-0" style={{ color: "var(--accent-orange)" }}>
-                    {item.day}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[13px] font-semibold leading-snug">{item.title}</p>
-                    <p className="text-[11px] mt-0.5 truncate" style={{ color: "var(--muted)" }}>{item.pain}</p>
-                    <div className="flex gap-1.5 mt-1.5 flex-wrap">
-                      <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${PLATFORM_COLOR[item.platform] || "bg-slate-100 text-slate-600"}`}>{item.platform}</span>
-                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">{item.format}</span>
-                      {item.type && <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-50 text-slate-500">{TYPE_LABEL[item.type] || item.type}</span>}
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => openAddModal(
-                      { title: item.title, platform: item.platform, format: item.format, pain: item.pain, hook: item.hook },
-                      padDay(planMonth, item.day)
-                    )}
-                    className="d-btn d-btn-secondary shrink-0"
-                  >
-                    <Plus size={12} />
-                    В календарь
-                  </button>
+            {monthPlan.length > 0 && (
+              <>
+                {/* Pagination */}
+                <div className="flex gap-2 mb-4 flex-wrap">
+                  {Array.from({ length: planPages }).map((_, i) => (
+                    <button
+                      key={i}
+                      onClick={() => setPlanPage(i)}
+                      className={`d-btn ${planPage === i ? "d-btn-primary" : "d-btn-secondary"}`}
+                      style={{ fontSize: "11px", padding: "6px 12px" }}
+                    >
+                      {i * 10 + 1}–{Math.min((i + 1) * 10, monthPlan.length)} день
+                    </button>
+                  ))}
                 </div>
-              ))}
-            </div>
+
+                {/* Grid of cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                  {monthPlan.slice(planPage * 10, planPage * 10 + 10).map((item, i) => (
+                    <div key={i} className="d-card p-4 flex flex-col gap-2 min-h-[220px]">
+                      <div className="text-[32px] font-black leading-none" style={{ color: "var(--accent-orange)" }}>
+                        {item.day}
+                      </div>
+                      <p className="text-[12px] font-semibold leading-snug flex-1">{item.title}</p>
+                      <p className="text-[10px] line-clamp-2" style={{ color: "var(--muted)" }}>{item.pain}</p>
+                      <div className="flex flex-wrap gap-1">
+                        <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${PLATFORM_COLOR[item.platform] || "bg-slate-100 text-slate-600"}`}>{item.platform}</span>
+                        <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600">{item.format}</span>
+                        {item.type && <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-50 text-slate-500">{TYPE_LABEL[item.type] || item.type}</span>}
+                      </div>
+                      {item.hook && (
+                        <p className="text-[10px] italic line-clamp-2" style={{ color: "var(--muted)" }}>{item.hook}</p>
+                      )}
+                      <button
+                        onClick={() => openAddModal(
+                          { title: item.title, platform: item.platform, format: item.format, pain: item.pain, hook: item.hook },
+                          padDay(planMonth, item.day)
+                        )}
+                        className="d-btn d-btn-secondary mt-auto"
+                        style={{ fontSize: "10px", padding: "5px 8px" }}
+                      >
+                        <Plus size={10} />
+                        В календарь
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Bottom pagination */}
+                {planPages > 1 && (
+                  <div className="flex justify-center gap-2 mt-4">
+                    <button onClick={() => setPlanPage(p => Math.max(0, p - 1))} disabled={planPage === 0} className="d-btn d-btn-secondary">
+                      <ChevronLeft size={14} />
+                    </button>
+                    <span className="text-[12px] flex items-center px-2" style={{ color: "var(--muted)" }}>
+                      Страница {planPage + 1} из {planPages}
+                    </span>
+                    <button onClick={() => setPlanPage(p => Math.min(planPages - 1, p + 1))} disabled={planPage === planPages - 1} className="d-btn d-btn-secondary">
+                      <ChevronRight size={14} />
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
 
@@ -683,13 +853,21 @@ export default function Page() {
               </button>
             </div>
 
+            {calError && (
+              <div className="d-card p-4 mb-4 text-[12px] text-red-600">
+                {calError}
+                {calError.includes("не существует") || calError.includes("does not exist") ? (
+                  <p className="mt-1">Запустите SQL из инструкции для создания таблицы calendar_entries.</p>
+                ) : null}
+              </div>
+            )}
+
             {loadingCal ? (
               <div className="d-card p-12 text-center">
                 <Loader2 size={24} className="animate-spin mx-auto" style={{ color: "var(--muted)" }} />
               </div>
             ) : (
               <>
-                {/* Calendar grid */}
                 <div className="d-card p-4 mb-4">
                   <div className="grid grid-cols-7 gap-1 mb-2">
                     {["Пн","Вт","Ср","Чт","Пт","Сб","Вс"].map(d => (
@@ -733,10 +911,9 @@ export default function Page() {
                   </div>
                 </div>
 
-                {/* List view */}
                 {calMonthEntries.length === 0 ? (
                   <div className="text-center py-8 text-[12px]" style={{ color: "var(--muted)" }}>
-                    Нет записей на {formatMonthLabel(calMonth)}. Нажмите «Добавить» или используйте кнопки «В календарь» в других разделах.
+                    Нет записей на {formatMonthLabel(calMonth)}. Нажмите «Добавить» или используйте кнопки «В календарь».
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -776,6 +953,106 @@ export default function Page() {
             )}
           </div>
         )}
+
+        {/* ── Forecast Tab ──────────────────────────────────────────────────── */}
+        {activeTab === "forecast" && (
+          <div>
+            <div className="d-topbar">
+              <div>
+                <h1 className="text-[18px] font-bold tracking-tight">Прогноз</h1>
+                <p className="text-[11px] mt-0.5" style={{ color: "var(--muted)" }}>
+                  Что делать на этой неделе чтобы превысить прошлую
+                </p>
+              </div>
+              <button onClick={handleGenerateForecast} disabled={generatingForecast} className="d-btn d-btn-primary">
+                {generatingForecast ? <Loader2 size={13} className="animate-spin" /> : <TrendingUp size={13} />}
+                {generatingForecast ? "Анализируем…" : "Получить прогноз"}
+              </button>
+            </div>
+
+            {forecastError && <div className="d-card p-4 mb-4 text-[12px] text-red-600">{forecastError}</div>}
+
+            {!forecastData && !generatingForecast && (
+              <div className="d-card p-12 text-center">
+                <TrendingUp size={32} className="mx-auto mb-4" style={{ color: "var(--muted)" }} />
+                <p className="text-[13px] font-semibold mb-2">Прогноз на неделю</p>
+                <p className="text-[12px]" style={{ color: "var(--muted)" }}>
+                  {cache.leads.length === 0
+                    ? "Сначала запустите анализ диалогов"
+                    : `На основе ${cache.leads.length} диалогов, ${hot} горячих и ${warm} тёплых лидов, AI сформирует конкретный план действий`}
+                </p>
+              </div>
+            )}
+
+            {forecastData && (
+              <div className="space-y-4">
+                {/* Conclusion */}
+                <div className="d-summary-card">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.8px] mb-3 text-orange-400">Общая картина</p>
+                  <p className="text-[13px] leading-relaxed text-white/90">{forecastData.conclusion}</p>
+                </div>
+
+                {/* Focus */}
+                <div className="d-card p-5 border-l-4" style={{ borderLeftColor: "var(--accent-orange)" }}>
+                  <div className="flex items-start gap-3">
+                    <Target size={18} className="text-orange-500 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-[0.7px] mb-1" style={{ color: "var(--muted)" }}>Фокус недели</p>
+                      <p className="text-[14px] font-bold">{forecastData.focusTopic}</p>
+                      <p className="text-[12px] mt-1" style={{ color: "var(--muted)" }}>{forecastData.focusReason}</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div>
+                  <p className="d-section-title">Топ-{forecastData.actions?.length} действий на неделю</p>
+                  <div className="space-y-3">
+                    {forecastData.actions?.map((action, i) => (
+                      <div key={i} className="d-card p-5">
+                        <div className="flex items-start gap-3">
+                          <div className="text-[22px] font-black w-7 text-center shrink-0" style={{ color: "var(--accent-orange)" }}>{i + 1}</div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-2 flex-wrap">
+                              <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${PRIORITY_COLOR[action.priority] || "bg-slate-100 text-slate-600"}`}>
+                                {action.priority}
+                              </span>
+                              {action.platform && (
+                                <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${PLATFORM_COLOR[action.platform] || "bg-slate-100 text-slate-600"}`}>
+                                  {action.platform}
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[13px] font-semibold mb-1">{action.action}</p>
+                            <p className="text-[12px] mb-2" style={{ color: "var(--muted)" }}>{action.reason}</p>
+                            {action.expectedResult && (
+                              <p className="text-[11px] font-medium text-green-600">→ {action.expectedResult}</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Risks */}
+                {forecastData.risks?.length > 0 && (
+                  <div className="d-card p-5">
+                    <p className="d-section-title">Риски</p>
+                    <div className="space-y-2">
+                      {forecastData.risks.map((risk, i) => (
+                        <div key={i} className="flex items-start gap-2">
+                          <AlertTriangle size={13} className="text-orange-400 shrink-0 mt-0.5" />
+                          <p className="text-[12px]" style={{ color: "var(--muted)" }}>{risk}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </main>
 
       {/* ── Add-to-Calendar Modal ──────────────────────────────────────────── */}
@@ -784,7 +1061,7 @@ export default function Page() {
           <div className="d-card p-6 w-full max-w-md" style={{ background: "var(--surface-solid)" }}>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-[14px] font-bold">Добавить в календарь</h2>
-              <button onClick={() => { setAddModal(null); setAddDate(""); setAddTitle(""); }} style={{ color: "var(--muted)" }}>
+              <button onClick={() => { setAddModal(null); setAddDate(""); setAddTitle(""); setAddError(null); }} style={{ color: "var(--muted)" }}>
                 <X size={16} />
               </button>
             </div>
@@ -804,7 +1081,7 @@ export default function Page() {
               <p className="text-[12px] mb-4 line-clamp-2" style={{ color: "var(--muted)" }}>{addModal.item.title}</p>
             )}
 
-            <div className="mb-5">
+            <div className="mb-4">
               <label className="text-[11px] font-semibold mb-1.5 block" style={{ color: "var(--muted)" }}>Дата публикации</label>
               <input
                 type="date"
@@ -815,8 +1092,10 @@ export default function Page() {
               />
             </div>
 
+            {addError && <p className="text-[11px] text-red-600 mb-3">{addError}</p>}
+
             <div className="flex gap-2 justify-end">
-              <button onClick={() => { setAddModal(null); setAddDate(""); setAddTitle(""); }} className="d-btn d-btn-secondary">Отмена</button>
+              <button onClick={() => { setAddModal(null); setAddDate(""); setAddTitle(""); setAddError(null); }} className="d-btn d-btn-secondary">Отмена</button>
               <button
                 onClick={handleAddToCalendar}
                 disabled={addingToCalendar || !addDate || !(addModal.item.title || addTitle.trim())}
