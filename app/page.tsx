@@ -7,7 +7,7 @@ import {
   Plus, Trash2, ChevronLeft, ChevronRight, Loader2, Check, X,
 } from "lucide-react";
 import {
-  emptyCache, upsertLeads, loadCache, saveCache, DashboardCache, CachedLead,
+  emptyCache, upsertLeads, loadCache, saveCache, DashboardCache, CachedLead, DialogSnapshot,
 } from "@/app/lib/cache";
 import { diffDialogs, chunkArray, ConversationMeta, LeadAnalysis, Dialog } from "@/app/lib/analyze-utils";
 
@@ -160,8 +160,40 @@ export default function Page() {
   const [addingToCalendar, setAddingToCalendar] = useState(false);
 
   useEffect(() => {
-    const c = loadCache();
-    if (c) setCache(c);
+    async function init() {
+      const c = loadCache();
+      if (c && c.leads.length > 0) { setCache(c); return; }
+      // localStorage пустой — грузим из Supabase
+      try {
+        const [leadsRes, snapsRes] = await Promise.all([
+          fetch("/api/db/leads"),
+          fetch("/api/db/snapshots"),
+        ]);
+        const leadsData = await leadsRes.json();
+        const snapsData = await snapsRes.json();
+        const rows = (leadsData.leads as Record<string, unknown>[]) || [];
+        if (!rows.length) return;
+        const leads: CachedLead[] = rows.map(r => ({
+          id: r.id as number,
+          userName: r.user_name as string,
+          messageCount: r.message_count as number,
+          lastDate: r.last_date as string,
+          status: r.status as "hot" | "warm" | "cold",
+          summary: r.summary as string,
+          mainPain: r.main_pain as string,
+          interests: (r.interests as string[]) || [],
+          objections: (r.objections as string[]) || [],
+          nextStep: r.next_step as string,
+          recommendedProduct: r.recommended_product as string,
+          analyzedAt: r.analyzed_at as number || Date.now(),
+        }));
+        const snapshots = snapsData.snapshots as Record<number, DialogSnapshot> || {};
+        const restored: DashboardCache = { version: 2, lastSyncAt: Date.now(), leads, insights: null, dialogSnapshots: snapshots };
+        setCache(restored);
+        saveCache(restored);
+      } catch { /* silent */ }
+    }
+    init();
   }, []);
 
   useEffect(() => {
@@ -252,9 +284,9 @@ export default function Page() {
       }
 
       // 7. Save snapshots for new dialogs
-      const newSnapshots: Record<number, { messageCount: number; lastMessageTs: number; analyzedAt: number }> = {};
+      const newSnapshots: Record<number, DialogSnapshot> = {};
       for (const meta of allMeta.filter(m => newIds.includes(m.id))) {
-        newSnapshots[meta.id] = { messageCount: meta.messageCount, lastMessageTs: meta.lastMessageTs, analyzedAt: Date.now() };
+        newSnapshots[meta.id] = { id: meta.id, messageCount: meta.messageCount, lastMessageTs: meta.lastMessageTs, analyzedAt: Date.now() };
       }
       if (Object.keys(newSnapshots).length > 0) {
         await fetch("/api/db/snapshots", {
