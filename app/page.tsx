@@ -1,1755 +1,802 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
-
-const truncate = (s: string, n = 18) => s.length > n ? s.slice(0, n) + "…" : s;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const YTick = ({ x, y, payload }: any) => (
-  <text x={x - 4} y={y} textAnchor="end" dominantBaseline="middle" fontSize={11} fill="#475569">
-    <title>{payload.value}</title>
-    {truncate(payload.value)}
-  </text>
-);
+import { useState, useEffect, useCallback } from "react";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
-} from "recharts";
-import {
-  Flame, Cloud, Snowflake, RefreshCw, ChevronDown, ChevronUp,
-  Zap, BookOpen, TrendingUp, MessageSquare, Users, Lightbulb,
-  Download, Search, RotateCcw, Trash2, CheckCircle,
-  X,
+  RefreshCw, BarChart2, PenLine, CalendarDays, Calendar,
+  Plus, Trash2, ChevronLeft, ChevronRight, Loader2, Check, X,
 } from "lucide-react";
 import {
-  emptyCache, upsertLeads, downloadCSV,
-  CachedLead, Insights, DashboardCache, loadCache, ContentIdea,
+  emptyCache, upsertLeads, loadCache, saveCache, DashboardCache, CachedLead,
 } from "@/app/lib/cache";
-import { diffDialogs, chunkArray, ConversationMeta, LeadAnalysis } from "@/app/lib/analyze-utils";
+import { diffDialogs, chunkArray, ConversationMeta, LeadAnalysis, Dialog } from "@/app/lib/analyze-utils";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Types ─────────────────────────────────────────────────────────────────────
 
-interface SyncBadge { newCount: number; updatedCount: number }
+interface ProgressState { label: string; current: number; total: number }
 
-interface ProgressState {
-  step: number;
-  totalSteps: number;
-  label: string;
-  current: number;
-  total: number;
-  startedAt: number;
+interface GeneratedIdea {
+  title: string; platform: string; format: string; hook: string; content: string;
 }
 
-// ─── Config ───────────────────────────────────────────────────────────────────
+interface DayPlan {
+  day: number; title: string; platform: string; format: string;
+  pain: string; hook: string; type: string;
+}
 
-const STATUS_CONFIG = {
-  hot:  { label: "Горячий",  icon: Flame,     color: "text-orange-500", bg: "bg-orange-50 border-orange-200",  dot: "bg-orange-500",  pill: "bg-orange-100 text-orange-700 border-orange-200" },
-  warm: { label: "Тёплый",   icon: Cloud,     color: "text-blue-500",   bg: "bg-blue-50 border-blue-200",      dot: "bg-blue-400",    pill: "bg-blue-100 text-blue-700 border-blue-200" },
-  cold: { label: "Холодный", icon: Snowflake, color: "text-slate-400",  bg: "bg-slate-50 border-slate-200",    dot: "bg-slate-400",   pill: "bg-slate-100 text-slate-600 border-slate-200" },
-};
+interface CalendarEntry {
+  id: string; title: string; platform?: string; format?: string;
+  content?: string; scheduled_date?: string; status: string;
+  pain?: string; hook?: string; created_at: string;
+}
 
-const PRIORITY_CONFIG = {
-  urgent:    { label: "Срочно",      icon: Zap,       color: "text-orange-600", bg: "bg-orange-50 border-orange-200",  badge: "bg-orange-100 text-orange-700" },
-  warm:      { label: "Прогрев",     icon: TrendingUp, color: "text-blue-600",  bg: "bg-blue-50 border-blue-200",      badge: "bg-blue-100 text-blue-700" },
-  education: { label: "Образование", icon: BookOpen,  color: "text-violet-600", bg: "bg-violet-50 border-violet-200",  badge: "bg-violet-100 text-violet-700" },
-};
+// ─── Helpers ───────────────────────────────────────────────────────────────────
 
-const BATCH_SIZE = 3; // smaller batches = less wasted work if one fails
+function computeTopPains(leads: CachedLead[]) {
+  const map = new Map<string, number>();
+  for (const l of leads) {
+    if (l.mainPain) map.set(l.mainPain, (map.get(l.mainPain) || 0) + 1);
+  }
+  return Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8)
+    .map(([label, count]) => ({ label, count }));
+}
 
-// Safe JSON parse — handles Vercel timeout plain-text responses
+function computeTopObjections(leads: CachedLead[]) {
+  const map = new Map<string, number>();
+  for (const l of leads) {
+    for (const obj of l.objections || []) map.set(obj, (map.get(obj) || 0) + 1);
+  }
+  return Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, 6)
+    .map(([label, count]) => ({ label, count }));
+}
+
+const MONTHS_RU = ["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
+
+function getCurrentYM() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function formatMonthLabel(ym: string) {
+  const [y, m] = ym.split("-");
+  return `${MONTHS_RU[parseInt(m) - 1]} ${y}`;
+}
+
+function getDaysInMonth(ym: string) {
+  const [y, m] = ym.split("-").map(Number);
+  return new Date(y, m, 0).getDate();
+}
+
+function getFirstDayOfMonth(ym: string) {
+  const [y, m] = ym.split("-").map(Number);
+  const day = new Date(y, m - 1, 1).getDay();
+  return day === 0 ? 6 : day - 1;
+}
+
+function shiftMonth(ym: string, delta: number) {
+  const [y, m] = ym.split("-").map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function padDay(ym: string, day: number) {
+  return `${ym}-${String(day).padStart(2, "0")}`;
+}
+
 async function safeJson(res: Response): Promise<Record<string, unknown>> {
   const text = await res.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    // If the response is HTML, it's likely a redirect to the login page (session expired)
-    if (text.trimStart().startsWith("<!DOCTYPE") || text.trimStart().startsWith("<html")) {
-      window.location.href = "/login";
-      throw new Error("Сессия истекла. Перенаправляем на страницу входа...");
-    }
-    throw new Error(
-      res.status === 504 || res.status === 502
-        ? "Превышено время ожидания сервера. Попробуйте ещё раз — часть данных уже сохранена."
-        : `Ошибка сервера (${res.status}): ${text.slice(0, 80)}`
-    );
+  try { return JSON.parse(text); } catch {
+    if (text.trimStart().startsWith("<!")) { window.location.href = "/login"; throw new Error("Сессия истекла"); }
+    throw new Error(`Ошибка сервера (${res.status})`);
   }
 }
 
-// ─── Small components ─────────────────────────────────────────────────────────
+const PLATFORM_COLOR: Record<string, string> = {
+  "ВКонтакте": "bg-blue-100 text-blue-700",
+  "YouTube": "bg-red-100 text-red-700",
+  "Instagram": "bg-purple-100 text-purple-700",
+};
 
-function StatCard({ label, value, sub, color }: { label: string; value: number | string; sub?: string; color: string }) {
+const TYPE_LABEL: Record<string, string> = {
+  warm: "Прогрев", education: "Обучение", sales: "Продажи",
+};
+
+// ─── Small components ──────────────────────────────────────────────────────────
+
+function StatCard({ label, value, color }: { label: string; value: number | string; color: string }) {
   return (
     <div className="d-stat-card">
-      <p className="text-[10px] font-semibold uppercase tracking-[0.7px] mb-2.5" style={{ color: "var(--muted)" }}>{label}</p>
-      <p className={`text-[40px] sm:text-[44px] font-black leading-none tracking-[-2.5px] ${color}`}>{value}</p>
-      {sub && <p className="text-[11px] mt-2" style={{ color: "var(--muted)" }}>{sub}</p>}
+      <p className="text-[10px] font-semibold uppercase tracking-[0.7px] mb-2" style={{ color: "var(--muted)" }}>{label}</p>
+      <p className={`text-[40px] font-black leading-none tracking-[-2px] ${color}`}>{value}</p>
     </div>
   );
 }
 
-function ProgressBar({ progress, label, eta }: { progress: number; label: string; eta?: number }) {
+function PBar({ label, current, total }: ProgressState) {
+  const pct = total > 0 ? Math.min((current / total) * 100, 100) : 5;
   return (
-    <div className="mb-3">
-      <div className="flex justify-between text-xs mb-1">
+    <div className="d-card p-4 mb-4">
+      <div className="flex justify-between text-xs mb-2">
         <span className="text-slate-600">{label}</span>
-        <span className="text-slate-400">
-          {eta !== undefined && eta > 0 ? `~${eta} сек` : `${Math.round(progress * 100)}%`}
-        </span>
+        <span className="text-slate-400">{Math.round(pct)}%</span>
       </div>
       <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-        <div
-          className="h-full bg-slate-800 rounded-full transition-all duration-300"
-          style={{ width: `${Math.min(progress * 100, 100)}%` }}
-        />
+        <div className="h-full bg-slate-800 rounded-full transition-all duration-300" style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
 }
 
-function LeadCard({ lead }: { lead: CachedLead }) {
-  const [open, setOpen] = useState(false);
-  const [resurrecting, setResurrecting] = useState(false);
-  const [resurrectMsg, setResurrectMsg] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const cfg = STATUS_CONFIG[lead.status];
-  const Icon = cfg.icon;
+// ─── Page ──────────────────────────────────────────────────────────────────────
 
-  const handleResurrect = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setResurrecting(true);
-    setResurrectMsg(null);
-    try {
-      const res = await fetch("/api/generate-message", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lead, mode: "resurrect" }),
-      });
-      const data = await res.json();
-      setResurrectMsg(data.message ?? data.error ?? "Ошибка");
-      if (!open) setOpen(true);
-    } catch {
-      setResurrectMsg("Ошибка генерации");
-    } finally {
-      setResurrecting(false);
-    }
-  };
-
-  const handleCopy = () => {
-    if (!resurrectMsg) return;
-    navigator.clipboard.writeText(resurrectMsg);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <div className="d-card overflow-hidden">
-      <button
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-3 p-4 text-left transition-colors"
-        style={{ background: "transparent" }}
-        onMouseEnter={e => (e.currentTarget.style.background = "rgba(0,0,0,0.02)")}
-        onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
-      >
-        <span className={`w-2 h-2 rounded-full ${cfg.dot} flex-shrink-0`} />
-        <span className="font-medium flex-1 text-sm" style={{ color: "var(--text)" }}>{lead.userName}</span>
-        {lead.isNew && <span className="text-xs bg-green-100 text-green-700 border border-green-200 rounded-full px-2 py-0.5 font-medium">новый</span>}
-        {lead.isUpdated && <span className="text-xs bg-yellow-100 text-yellow-700 border border-yellow-200 rounded-full px-2 py-0.5 font-medium">обновлён</span>}
-        {lead.status === "warm" && (
-          <button
-            onClick={handleResurrect}
-            disabled={resurrecting}
-            className="text-xs px-2.5 py-1 rounded-lg border border-blue-200 text-blue-600 bg-blue-50 hover:bg-blue-100 font-medium transition-colors disabled:opacity-50 mr-1"
-          >
-            {resurrecting ? "..." : "Реанимировать"}
-          </button>
-        )}
-        <span className={`flex items-center gap-1 text-xs font-medium ${cfg.color} mr-2`}>
-          <Icon size={13} />{cfg.label}
-        </span>
-        <span className="text-xs mr-2" style={{ color: "var(--muted-light)" }}>{lead.lastDate}</span>
-        {open ? <ChevronUp size={16} style={{ color: "var(--muted-light)" }} /> : <ChevronDown size={16} style={{ color: "var(--muted-light)" }} />}
-      </button>
-      {open && (
-        <div className="px-4 pb-4 grid grid-cols-1 md:grid-cols-2 gap-3 pt-3" style={{ borderTop: "1px solid var(--border)" }}>
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Саммари</p>
-            <p className="text-sm" style={{ color: "var(--text)" }}>{lead.summary}</p>
-          </div>
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Главная боль</p>
-            <p className="text-sm" style={{ color: "var(--text)" }}>{lead.mainPain}</p>
-          </div>
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Интересы</p>
-            <div className="flex flex-wrap gap-1">
-              {lead.interests.map((i, idx) => (
-                <span key={idx} className="text-xs rounded-full px-2 py-0.5" style={{ background: "var(--surface-solid)", border: "1px solid var(--border-solid)", color: "var(--text)" }}>{i}</span>
-              ))}
-            </div>
-          </div>
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Возражения</p>
-            <div className="flex flex-wrap gap-1">
-              {lead.objections.map((o, idx) => (
-                <span key={idx} className="text-xs bg-red-50 border border-red-100 rounded-full px-2 py-0.5 text-red-600">{o}</span>
-              ))}
-            </div>
-          </div>
-          <div className="md:col-span-2">
-            <p className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Следующий шаг</p>
-            <p className="text-sm font-medium rounded-lg px-3 py-2" style={{ background: "var(--surface-solid)", border: "1px solid var(--border-solid)", color: "var(--text)" }}>
-              → {lead.nextStep}
-            </p>
-          </div>
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Рекомендуемый продукт</p>
-            <p className="text-sm" style={{ color: "var(--text)" }}>{lead.recommendedProduct}</p>
-          </div>
-          {resurrectMsg && (
-            <div className="md:col-span-2">
-              <div className="flex items-center justify-between mb-1">
-                <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--muted)" }}>Сообщение для реанимации</p>
-                <button
-                  onClick={handleCopy}
-                  className="text-xs px-2.5 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 font-medium transition-colors"
-                >
-                  {copied ? "✓ Скопировано" : "Копировать"}
-                </button>
-              </div>
-              <p className="text-sm rounded-lg px-3 py-2.5 leading-relaxed" style={{ background: "rgba(59,130,246,0.05)", border: "1px solid rgba(59,130,246,0.2)", color: "var(--text)" }}>
-                {resurrectMsg}
-              </p>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ContentCard({ rec }: { rec: Insights["contentRecommendations"][0] }) {
-  const cfg = PRIORITY_CONFIG[rec.priority];
-  const Icon = cfg.icon;
-  return (
-    <div className="d-card p-4">
-      <div className="flex items-start justify-between gap-2 mb-2">
-        <div className="flex items-center gap-2">
-          <Icon size={16} className={cfg.color} />
-          <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${cfg.badge}`}>{cfg.label}</span>
-        </div>
-        <span className="text-xs text-slate-500 whitespace-nowrap">{rec.leadsCount} лидов</span>
-      </div>
-      <p className="font-semibold text-sm mb-1" style={{ color: "var(--text)" }}>{rec.title}</p>
-      <div className="flex items-center gap-2 mt-2">
-        <span className="text-xs rounded px-2 py-0.5" style={{ background: "var(--surface-solid)", border: "1px solid var(--border-solid)", color: "var(--text)" }}>{rec.format}</span>
-        <span className="text-xs" style={{ color: "var(--muted)" }}>Боль: {rec.pain}</span>
-      </div>
-    </div>
-  );
-}
-
-// ─── Main dashboard ───────────────────────────────────────────────────────────
-
-export default function Dashboard() {
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [cache, setCache] = useState<DashboardCache | null>(null);
-  // Ref so useCallback closures always read the latest cache without needing it in deps
-  const cacheRef = useRef<DashboardCache | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+export default function Page() {
+  const [activeTab, setActiveTab] = useState<"analysis" | "create" | "plan" | "calendar">("analysis");
+  const [cache, setCache] = useState<DashboardCache>(emptyCache());
+  const [syncing, setSyncing] = useState(false);
   const [progress, setProgress] = useState<ProgressState | null>(null);
-  const [badge, setBadge] = useState<SyncBadge | null>(null);
-  const [activeTab, setActiveTab] = useState<"strategy" | "content" | "tasks" | "leads" | "payments">("strategy");
-  const [paymentForm, setPaymentForm] = useState<{ leadId: number; date: string; note: string } | null>(null);
-  const [activePainIndex, setActivePainIndex] = useState(0);
-  const [refreshingStrategy, setRefreshingStrategy] = useState(false);
-  const [filterStatus, setFilterStatus] = useState<"all" | "hot" | "warm" | "cold">("all");
-  const [search, setSearch] = useState("");
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
-  const [showFullConfirm, setShowFullConfirm] = useState(false);
-  const [segmentGenerating, setSegmentGenerating] = useState<string | null>(null);
-  const [segmentIdeas, setSegmentIdeas] = useState<Record<string, ContentIdea[]>>({});
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
 
+  // Create tab
+  const [topic, setTopic] = useState("");
+  const [generatingCustom, setGeneratingCustom] = useState(false);
+  const [customIdeas, setCustomIdeas] = useState<GeneratedIdea[]>([]);
+  const [customError, setCustomError] = useState<string | null>(null);
 
-  // Keep ref in sync with state so useCallback closures always get the latest cache
-  useEffect(() => { cacheRef.current = cache; }, [cache]);
+  // Plan tab
+  const [planMonth, setPlanMonth] = useState(getCurrentYM());
+  const [generatingPlan, setGeneratingPlan] = useState(false);
+  const [monthPlan, setMonthPlan] = useState<DayPlan[]>([]);
+  const [planError, setPlanError] = useState<string | null>(null);
 
-  // Fetch role from server — cookie is httpOnly so we can't read it from JS
+  // Calendar tab
+  const [calMonth, setCalMonth] = useState(getCurrentYM());
+  const [calEntries, setCalEntries] = useState<CalendarEntry[]>([]);
+  const [loadingCal, setLoadingCal] = useState(false);
+
+  // Add-to-calendar modal
+  const [addModal, setAddModal] = useState<{ item: Partial<CalendarEntry> } | null>(null);
+  const [addDate, setAddDate] = useState("");
+  const [addTitle, setAddTitle] = useState("");
+  const [addingToCalendar, setAddingToCalendar] = useState(false);
+
   useEffect(() => {
-    fetch("/api/auth/me").then(r => r.json()).then(d => setIsAdmin(d.role === "admin")).catch(() => {});
+    const c = loadCache();
+    if (c) setCache(c);
   }, []);
 
-  // Hydrate from Supabase on mount
   useEffect(() => {
-    async function hydrate() {
-      try {
-        const [leadsRes, snapshotsRes, insightsRes] = await Promise.all([
-          fetch("/api/db/leads"),
-          fetch("/api/db/snapshots"),
-          fetch("/api/db/insights"),
-        ]);
-        const [leadsData, snapshotsData, insightsData] = await Promise.all([
-          leadsRes.json(), snapshotsRes.json(), insightsRes.json(),
-        ]);
+    if (activeTab === "calendar") loadCalendar();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
-        // Map snake_case → camelCase from DB
-        const leads: CachedLead[] = (leadsData.leads ?? []).map((r: {
-          id: number; user_name: string; message_count: number; last_date: string;
-          status: "hot" | "warm" | "cold"; summary: string; main_pain: string;
-          interests: string[]; objections: string[]; next_step: string;
-          recommended_product: string; analyzed_at: number;
-          payment_date?: string | null; payment_note?: string | null; payment_status?: string | null;
-        }) => ({
-          id: r.id, userName: r.user_name, messageCount: r.message_count,
-          lastDate: r.last_date, status: r.status, summary: r.summary,
-          mainPain: r.main_pain, interests: r.interests ?? [],
-          objections: r.objections ?? [], nextStep: r.next_step,
-          recommendedProduct: r.recommended_product, analyzedAt: r.analyzed_at,
-          paymentDate: r.payment_date ?? null,
-          paymentNote: r.payment_note ?? null,
-          paymentStatus: (r.payment_status as CachedLead["paymentStatus"]) ?? null,
-        }));
+  const topPains = computeTopPains(cache.leads);
+  const topObjections = computeTopObjections(cache.leads);
+  const hot = cache.leads.filter(l => l.status === "hot").length;
+  const warm = cache.leads.filter(l => l.status === "warm").length;
+  const cold = cache.leads.filter(l => l.status === "cold").length;
 
-        setCache({
-          version: 2,
-          lastSyncAt: leads.length > 0 ? Date.now() : 0,
-          leads,
-          insights: insightsData.insights ?? null,
-          dialogSnapshots: snapshotsData.snapshots ?? {},
-        });
-      } catch {}
-    }
-    hydrate();
-  }, []);
+  // ─── Sync 300 dialogs ──────────────────────────────────────────────────────
 
-  const updateProgress = useCallback((update: Partial<ProgressState>) => {
-    setProgress(prev => prev ? { ...prev, ...update } : null);
-  }, []);
-
-  // Save leads + snapshots + insights to Supabase (fire-and-forget, errors non-fatal)
-  const saveToDb = useCallback(async (c: DashboardCache) => {
+  const handleSync = useCallback(async () => {
+    setSyncing(true);
+    setSyncMsg(null);
     try {
-      await Promise.all([
-        fetch("/api/db/leads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ leads: c.leads }) }),
-        fetch("/api/db/snapshots", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ snapshots: c.dialogSnapshots }) }),
-        c.insights && fetch("/api/db/insights", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ insights: c.insights }) }),
-      ]);
-    } catch {}
-  }, []);
-
-  // ── Refresh strategy only (no VK sync) ─────────────────────────────────────
-  const handleRefreshStrategy = useCallback(async () => {
-    if (!cache?.leads.length) return;
-    setRefreshingStrategy(true);
-    setError(null);
-    try {
-      // Aggregate pains with rich context: status breakdown, interests, summaries
-      const painGroups: Record<string, CachedLead[]> = {};
-      const objMap: Record<string, number> = {};
-      for (const l of cache.leads) {
-        if (l.mainPain) {
-          if (!painGroups[l.mainPain]) painGroups[l.mainPain] = [];
-          painGroups[l.mainPain].push(l);
-        }
-        for (const o of l.objections ?? []) objMap[o] = (objMap[o] ?? 0) + 1;
+      // 1. Scan 3 × 100 metadata
+      const allMeta: ConversationMeta[] = [];
+      for (let i = 0; i < 3; i++) {
+        const offset = i * 100;
+        setProgress({ label: `Сканируем диалоги ${offset + 1}–${offset + 100}…`, current: offset, total: 300 });
+        const res = await fetch(`/api/fetch-dialogs?mode=scan&offset=${offset}`);
+        const data = await safeJson(res);
+        const meta = (data.meta as ConversationMeta[]) || [];
+        allMeta.push(...meta);
+        if (meta.length < 100) break;
       }
-      const topPains = Object.entries(painGroups)
-        .sort((a, b) => b[1].length - a[1].length)
-        .slice(0, 4)
-        .map(([pain, group]) => {
-          const hot = group.filter(l => l.status === "hot").length;
-          const warm = group.filter(l => l.status === "warm").length;
-          const cold = group.filter(l => l.status === "cold").length;
-          const productFreq: Record<string, number> = {};
-          for (const l of group) {
-            if (l.recommendedProduct) productFreq[l.recommendedProduct] = (productFreq[l.recommendedProduct] ?? 0) + 1;
-          }
-          const topProduct = Object.entries(productFreq).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
-          const interestFreq: Record<string, number> = {};
-          for (const l of group) {
-            for (const i of l.interests ?? []) {
-              const key = i.toLowerCase();
-              interestFreq[key] = (interestFreq[key] ?? 0) + 1;
-            }
-          }
-          const topInterests = Object.entries(interestFreq).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([i]) => i);
-          return { pain, count: group.length, hot, warm, cold, topProduct, topInterests };
-        });
-      const topObjections = Object.entries(objMap)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 3)
-        .map(([objection, count]) => {
-          const hot = cache.leads.filter(l => l.objections?.includes(objection) && l.status === "hot").length;
-          return { objection, count, hot };
-        });
 
-      const res = await fetch("/api/content-strategy", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topPains, topObjections }),
-      });
-      const text = await res.text();
-      let parsed: { contentIdeas?: unknown; error?: string };
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        setError(`Парсинг упал. Ответ сервера: ${text.slice(0, 200)}`);
-        setRefreshingStrategy(false);
-        return;
-      }
-      if (parsed.error) {
-        setError(parsed.error as string);
-        setRefreshingStrategy(false);
-        return;
-      }
-      if (parsed.contentIdeas) {
-        const updatedInsights = {
-          ...(cache.insights ?? { topPains: [], topQuestions: [], topObjections: [], contentRecommendations: [], contentIdeas: [], summary: "" }),
-          contentIdeas: parsed.contentIdeas,
-        };
-        setCache(prev => prev ? { ...prev, insights: updatedInsights as typeof prev.insights } : prev);
-        await fetch("/api/db/insights", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ insights: updatedInsights }),
-        });
-      } else {
-        setError("AI не вернул данные контент-стратегии. Попробуйте ещё раз.");
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Неизвестная ошибка");
-    }
-    setRefreshingStrategy(false);
-  }, [cache]);
+      // 2. Load snapshots from Supabase
+      setProgress({ label: "Проверяем новые диалоги…", current: 0, total: 1 });
+      const snapsRes = await fetch("/api/db/snapshots");
+      const snapsData = await safeJson(snapsRes);
+      const snapshots = (snapsData.snapshots || {}) as Record<number, { messageCount: number; lastMessageTs: number; analyzedAt: number }>;
 
-  // ── Smart refresh (incremental) ──────────────────────────────────────────────
-  const handleSmartRefresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    setBadge(null);
-    const now = Date.now();
+      // 3. Diff — only NEW (never analyzed before)
+      const { newIds } = diffDialogs(allMeta, snapshots);
 
-    try {
-      // Step 1: Scan VK for conversation metadata
-      setProgress({ step: 1, totalSteps: 3, label: "Сканирование диалогов ВКонтакте...", current: 0, total: 0, startedAt: now });
-
-      const scanRes = await fetch("/api/fetch-dialogs?mode=scan");
-      const scanData = await safeJson(scanRes);
-      if (scanData.error) throw new Error(scanData.error as string);
-
-      const meta: ConversationMeta[] = (scanData.meta as ConversationMeta[]) ?? [];
-      const currentCache = cacheRef.current ?? emptyCache();
-
-      // Step 2: Diff against cache
-      const { newIds, changedIds } = diffDialogs(meta, currentCache.dialogSnapshots);
-      const toFetch = [...newIds, ...changedIds];
-
-      if (toFetch.length === 0) {
-        // Nothing changed — serve from cache immediately
-        setCache(currentCache);
-        setBadge({ newCount: 0, updatedCount: 0 });
+      if (newIds.length === 0) {
+        setSyncMsg("Новых диалогов нет — все уже проанализированы ранее");
         setProgress(null);
-        setLoading(false);
+        setSyncing(false);
         return;
       }
 
-      // Step 3: Fetch full history for new/changed only — in batches of 10 to avoid timeout
-      updateProgress({ step: 2, label: `Загрузка ${toFetch.length} диалогов...`, current: 0, total: toFetch.length });
-
-      const FETCH_BATCH = 20;
-      const fetchBatches = chunkArray(toFetch as Parameters<typeof chunkArray>[0], FETCH_BATCH);
-      const dialogs: unknown[] = [];
-      let fetchedCount = 0;
-
-      for (const fetchBatch of fetchBatches) {
-        const fetchRes = await fetch("/api/fetch-dialogs", {
+      // 4. Fetch full history for new dialogs
+      setProgress({ label: `Загружаем ${newIds.length} новых диалогов…`, current: 0, total: newIds.length });
+      const idChunks = chunkArray(newIds, 50);
+      const allDialogs: Dialog[] = [];
+      for (const chunk of idChunks) {
+        const res = await fetch("/api/fetch-dialogs", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ peerIds: fetchBatch }),
+          body: JSON.stringify({ peerIds: chunk }),
         });
-        const fetchData = await safeJson(fetchRes);
-        if (fetchData.error) throw new Error(fetchData.error as string);
-        dialogs.push(...((fetchData.dialogs as unknown[]) ?? []));
-        fetchedCount += (fetchBatch as unknown[]).length;
-        updateProgress({ step: 2, label: `Загрузка диалогов (${fetchedCount} из ${toFetch.length})...`, current: fetchedCount, total: toFetch.length });
+        const data = await safeJson(res);
+        allDialogs.push(...((data.dialogs as Dialog[]) || []));
       }
 
-      // Step 4: Analyze in batches — save to cache after EACH batch so no work is lost
-      const batches = chunkArray(dialogs as Parameters<typeof chunkArray>[0], BATCH_SIZE);
-      const newLeads: LeadAnalysis[] = [];
-      let processed = 0;
-      const analysisStart = Date.now();
-      const workingSnapshots = { ...currentCache.dialogSnapshots };
-
-      updateProgress({ step: 3, label: `Анализ Claude (0 из ${dialogs.length})...`, current: 0, total: dialogs.length, startedAt: analysisStart });
-
-      for (const batch of batches) {
-        const analyzeRes = await fetch("/api/analyze", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dialogs: batch }),
-        });
-        const analyzeData = await safeJson(analyzeRes);
-        const batchLeads = (analyzeData.leads as LeadAnalysis[]) ?? [];
-        newLeads.push(...batchLeads);
-
-        // ✅ Save partial results immediately — money not wasted on failure
-        const partialCachedLeads: CachedLead[] = batchLeads.map(l => ({
-          ...l,
-          analyzedAt: Date.now(),
-          isNew: newIds.includes(l.id),
-          isUpdated: changedIds.includes(l.id),
-        }));
-        const partialMerged = upsertLeads(currentCache.leads, [
-          ...newLeads.slice(0, -batchLeads.length).map(l => ({
-            ...l, analyzedAt: Date.now(),
-            isNew: newIds.includes(l.id), isUpdated: changedIds.includes(l.id),
-          })),
-          ...partialCachedLeads,
-        ]);
-        for (const m of meta) {
-          if (batchLeads.some(l => l.id === m.id)) {
-            workingSnapshots[m.id] = { id: m.id, messageCount: m.messageCount, lastMessageTs: m.lastMessageTs, analyzedAt: Date.now() };
-          }
-        }
-        const partialCache: DashboardCache = {
-          version: 2, lastSyncAt: Date.now(),
-          leads: partialMerged, insights: currentCache.insights,
-          dialogSnapshots: workingSnapshots,
-        };
-        saveToDb(partialCache);
-        setCache(partialCache);
-
-        processed += (batch as unknown[]).length;
-        const elapsed = (Date.now() - analysisStart) / 1000;
-        const rate = elapsed / processed;
-        const remaining = Math.max(0, Math.round(rate * (dialogs.length - processed)));
-        setProgress(prev => prev ? { ...prev, label: `Анализ Claude (${processed} из ${dialogs.length})...`, current: processed, total: dialogs.length, eta: remaining } as ProgressState & { eta: number } : null);
-      }
-
-      // Step 5: Final merge
-      const cachedLeadsWithFlags: CachedLead[] = newLeads.map(l => ({
-        ...l, analyzedAt: Date.now(),
-        isNew: newIds.includes(l.id), isUpdated: changedIds.includes(l.id),
-      }));
-      const mergedLeads = upsertLeads(currentCache.leads, cachedLeadsWithFlags);
-
-      // Step 6: Re-run insights with full merged dataset
-      updateProgress({ step: 3, label: "Формируем стратегические инсайты...", current: dialogs.length, total: dialogs.length });
-
-      const insightsRes = await fetch("/api/insights", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ leads: mergedLeads }),
-      });
-      const insightsData = await safeJson(insightsRes);
-      if (insightsData.error) throw new Error(insightsData.error as string);
-
-      // Step 7: Update snapshots
-      const newSnapshots = { ...currentCache.dialogSnapshots };
-      for (const m of meta) {
-        if (toFetch.includes(m.id)) {
-          newSnapshots[m.id] = { id: m.id, messageCount: m.messageCount, lastMessageTs: m.lastMessageTs, analyzedAt: Date.now() };
-        }
-      }
-
-      // Step 8: Save final state
-      const newCache: DashboardCache = {
-        version: 2, lastSyncAt: Date.now(),
-        leads: mergedLeads,
-        insights: insightsData.insights as Insights,
-        dialogSnapshots: newSnapshots,
-      };
-
-      saveToDb(newCache);
-      setCache(newCache);
-      setBadge({ newCount: newIds.length, updatedCount: changedIds.length });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Неизвестная ошибка");
-    } finally {
-      setLoading(false);
-      setProgress(null);
-    }
-  }, [updateProgress]);
-
-  // ── Full refresh ─────────────────────────────────────────────────────────────
-  const handleFullRefresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    setBadge(null);
-    setShowFullConfirm(false);
-    const now = Date.now();
-
-    try {
-      setProgress({ step: 1, totalSteps: 3, label: "Загрузка всех диалогов ВКонтакте...", current: 0, total: 0, startedAt: now });
-
-      const fetchRes = await fetch("/api/fetch-dialogs");
-      const fetchData = await safeJson(fetchRes);
-      if (fetchData.error) throw new Error(fetchData.error as string);
-      const dialogs = (fetchData.dialogs as unknown[]) ?? [];
-
-      const batches = chunkArray(dialogs as Parameters<typeof chunkArray>[0], BATCH_SIZE);
+      // 5. Analyze in batches of 10
+      const batches = chunkArray(allDialogs, 10);
       const allLeads: LeadAnalysis[] = [];
-      let processed = 0;
-      const analysisStart = Date.now();
-
-      updateProgress({ step: 2, label: `Анализ Claude (0 из ${dialogs.length})...`, current: 0, total: dialogs.length, startedAt: analysisStart });
-
-      for (const batch of batches) {
+      for (let i = 0; i < batches.length; i++) {
+        setProgress({
+          label: `Анализируем диалоги (${Math.min((i + 1) * 10, allDialogs.length)} / ${allDialogs.length})…`,
+          current: i * 10,
+          total: allDialogs.length,
+        });
         const res = await fetch("/api/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dialogs: batch }),
+          body: JSON.stringify({ dialogs: batches[i] }),
         });
         const data = await safeJson(res);
-        if (data.leads) allLeads.push(...(data.leads as LeadAnalysis[]));
-
-        // ✅ Save partial results after each batch
-        const partialLeads: CachedLead[] = allLeads.map(l => ({ ...l, analyzedAt: Date.now() }));
-        const partialSnapshots: DashboardCache["dialogSnapshots"] = {};
-        for (const l of partialLeads) {
-          partialSnapshots[l.id] = { id: l.id, messageCount: l.messageCount, lastMessageTs: 0, analyzedAt: Date.now() };
-        }
-        const partialCache: DashboardCache = {
-          version: 2, lastSyncAt: Date.now(),
-          leads: partialLeads, insights: null,
-          dialogSnapshots: partialSnapshots,
-        };
-        saveToDb(partialCache);
-        setCache(partialCache);
-
-        processed += (batch as unknown[]).length;
-        const elapsed = (Date.now() - analysisStart) / 1000;
-        const rate = elapsed / processed;
-        const remaining = Math.max(0, Math.round(rate * (dialogs.length - processed)));
-        setProgress(prev => prev ? { ...prev, label: `Анализ Claude (${processed} из ${dialogs.length})...`, current: processed, total: dialogs.length, eta: remaining } as ProgressState & { eta: number } : null);
+        allLeads.push(...((data.leads as LeadAnalysis[]) || []));
       }
 
-      updateProgress({ step: 3, label: "Формируем стратегические инсайты...", current: dialogs.length, total: dialogs.length });
-
-      const insightsRes = await fetch("/api/insights", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ leads: allLeads }),
-      });
-      const insightsData = await safeJson(insightsRes);
-      if (insightsData.error) throw new Error(insightsData.error as string);
-
-      const cachedLeads: CachedLead[] = allLeads.map(l => ({ ...l, analyzedAt: Date.now() }));
-      const newSnapshots: DashboardCache["dialogSnapshots"] = {};
-      for (const l of allLeads) {
-        newSnapshots[l.id] = { id: l.id, messageCount: l.messageCount, lastMessageTs: 0, analyzedAt: Date.now() };
+      // 6. Save leads to Supabase
+      setProgress({ label: "Сохраняем результаты…", current: 0, total: 1 });
+      if (allLeads.length > 0) {
+        await fetch("/api/db/leads", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ leads: allLeads.map(l => ({ ...l, analyzedAt: Date.now() })) }),
+        });
       }
 
-      const newCache: DashboardCache = {
+      // 7. Save snapshots for new dialogs
+      const newSnapshots: Record<number, { messageCount: number; lastMessageTs: number; analyzedAt: number }> = {};
+      for (const meta of allMeta.filter(m => newIds.includes(m.id))) {
+        newSnapshots[meta.id] = { messageCount: meta.messageCount, lastMessageTs: meta.lastMessageTs, analyzedAt: Date.now() };
+      }
+      if (Object.keys(newSnapshots).length > 0) {
+        await fetch("/api/db/snapshots", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ snapshots: newSnapshots }),
+        });
+      }
+
+      // 8. Update local cache
+      const newCachedLeads: CachedLead[] = allLeads.map(l => ({ ...l, analyzedAt: Date.now(), isNew: true }));
+      const updatedCache: DashboardCache = {
+        ...cache,
         version: 2,
         lastSyncAt: Date.now(),
-        leads: cachedLeads,
-        insights: insightsData.insights as Insights,
-        dialogSnapshots: newSnapshots,
+        leads: upsertLeads(cache.leads, newCachedLeads),
+        dialogSnapshots: { ...cache.dialogSnapshots, ...newSnapshots },
       };
-
-      saveToDb(newCache);
-      setCache(newCache);
-      setBadge({ newCount: dialogs.length, updatedCount: 0 });
+      setCache(updatedCache);
+      saveCache(updatedCache);
+      setSyncMsg(`Готово: проанализировано ${allLeads.length} новых диалогов из ${newIds.length}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Неизвестная ошибка");
+      setSyncMsg(e instanceof Error ? e.message : "Ошибка синхронизации");
     } finally {
-      setLoading(false);
       setProgress(null);
+      setSyncing(false);
     }
-  }, [updateProgress]);
+  }, [cache]);
 
-  // ── Derived data ─────────────────────────────────────────────────────────────
-  const leads = cache?.leads ?? [];
-  const insights = cache?.insights ?? null;
+  // ─── Generate custom content ───────────────────────────────────────────────
 
-  const filteredLeads = leads.filter(l => {
-    if (filterStatus !== "all" && l.status !== filterStatus) return false;
-    if (search && !l.userName.toLowerCase().includes(search.toLowerCase())) return false;
-    return true;
-  });
+  const handleGenerateCustom = useCallback(async () => {
+    if (!topic.trim()) return;
+    setGeneratingCustom(true);
+    setCustomError(null);
+    setCustomIdeas([]);
+    try {
+      const res = await fetch("/api/content-custom", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic, topPains, topObjections }),
+      });
+      const data = await safeJson(res);
+      if (data.error) throw new Error(data.error as string);
+      setCustomIdeas((data.ideas as GeneratedIdea[]) || []);
+    } catch (e) {
+      setCustomError(e instanceof Error ? e.message : "Ошибка генерации");
+    } finally {
+      setGeneratingCustom(false);
+    }
+  }, [topic, topPains, topObjections]);
 
-  const hot = leads.filter(l => l.status === "hot").length;
-  const warm = leads.filter(l => l.status === "warm").length;
-  const cold = leads.filter(l => l.status === "cold").length;
-  const total = leads.length;
+  // ─── Generate content plan ─────────────────────────────────────────────────
 
-  const normalizeProduct = (raw: string): string => {
-    const s = (raw || "").toLowerCase();
-    if (s.includes("магия") || (s.includes("тела") && !s.includes("мобильн"))) return "Магия Тела";
-    if (s.includes("прыжк")) return "Прыжки";
-    if (s.includes("мобильн") || s.includes("сила мобильн")) return "Сила Мобильности";
-    return "Неизвестно";
-  };
+  const handleGeneratePlan = useCallback(async () => {
+    if (!topPains.length) { setPlanError("Нет данных о болях. Сначала запустите анализ."); return; }
+    setGeneratingPlan(true);
+    setPlanError(null);
+    setMonthPlan([]);
+    try {
+      const res = await fetch("/api/content-plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ month: planMonth, topPains, topObjections }),
+      });
+      const data = await safeJson(res);
+      if (data.error) throw new Error(data.error as string);
+      setMonthPlan((data.plan as DayPlan[]) || []);
+    } catch (e) {
+      setPlanError(e instanceof Error ? e.message : "Ошибка генерации плана");
+    } finally {
+      setGeneratingPlan(false);
+    }
+  }, [planMonth, topPains, topObjections]);
 
-  const productData = Object.entries(
-    leads.reduce((acc, l) => {
-      const p = normalizeProduct(l.recommendedProduct);
-      acc[p] = (acc[p] || 0) + 1;
-      return acc;
-    }, {} as Record<string, number>)
-  ).map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count).filter(d => d.label !== "Неизвестно" || d.count > 0);
+  // ─── Calendar CRUD ─────────────────────────────────────────────────────────
 
-  const avgMsgsByStatus = (status: string) => {
-    const filtered = leads.filter(l => l.status === status);
-    if (!filtered.length) return 0;
-    return Math.round(filtered.reduce((s, l) => s + l.messageCount, 0) / filtered.length);
-  };
+  const loadCalendar = useCallback(async () => {
+    setLoadingCal(true);
+    try {
+      const res = await fetch("/api/db/calendar");
+      const data = await safeJson(res);
+      setCalEntries((data.entries as CalendarEntry[]) || []);
+    } catch { /* silent */ } finally {
+      setLoadingCal(false);
+    }
+  }, []);
 
-  const noObjCount = leads.filter(l => l.objections.length === 0).length;
-  const withObjCount = leads.length - noObjCount;
+  const openAddModal = useCallback((item: Partial<CalendarEntry>, date = "") => {
+    setAddModal({ item });
+    setAddDate(date);
+    setAddTitle(item.title || "");
+  }, []);
 
-  const interestData = Object.entries(
-    leads.flatMap(l => l.interests).reduce((acc, raw) => {
-      if (!raw) return acc;
-      // normalize: trim + lowercase first char to merge case variants
-      const key = raw.trim().charAt(0).toLowerCase() + raw.trim().slice(1);
-      acc[key] = (acc[key] || 0) + 1;
-      return acc;
-    }, {} as Record<string, number>)
-  ).map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count).slice(0, 8);
+  const handleAddToCalendar = useCallback(async () => {
+    const title = addModal?.item.title || addTitle;
+    if (!title.trim() || !addDate) return;
+    setAddingToCalendar(true);
+    try {
+      await fetch("/api/db/calendar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...addModal?.item, title, scheduled_date: addDate, status: "idea" }),
+      });
+      setAddModal(null);
+      setAddDate("");
+      setAddTitle("");
+      if (activeTab === "calendar") await loadCalendar();
+    } catch { /* silent */ } finally {
+      setAddingToCalendar(false);
+    }
+  }, [addModal, addTitle, addDate, activeTab, loadCalendar]);
 
-  const today = new Date().toISOString().slice(0, 10);
-  const lastSyncFormatted = cache?.lastSyncAt
-    ? new Date(cache.lastSyncAt).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
-    : null;
+  const deleteEntry = useCallback(async (id: string) => {
+    await fetch("/api/db/calendar", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    setCalEntries(prev => prev.filter(e => e.id !== id));
+  }, []);
 
-  const progressEta = (progress as (ProgressState & { eta?: number }) | null)?.eta;
+  const updateStatus = useCallback(async (id: string, status: string) => {
+    await fetch("/api/db/calendar", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, updates: { status } }),
+    });
+    setCalEntries(prev => prev.map(e => e.id === id ? { ...e, status } : e));
+  }, []);
 
-  const pendingPaymentsCount = leads.filter(l => l.paymentDate && (!l.paymentStatus || l.paymentStatus === "pending" || l.paymentStatus === "contacted")).length;
+  // ─── Nav ───────────────────────────────────────────────────────────────────
 
-  const NAV_ITEMS = [
-    { id: "strategy" as const, label: "Стратегия",  icon: "◈", badge: undefined as number | undefined, badgeOrange: false },
-    { id: "content"  as const, label: "Контент",    icon: "✦", badge: undefined as number | undefined, badgeOrange: false },
-    { id: "tasks"    as const, label: "Сообщения",  icon: "✉", badge: leads.filter(l => l.status !== "cold").length || undefined, badgeOrange: false },
-    { id: "leads"    as const, label: "Лиды",       icon: "◉", badge: total || undefined, badgeOrange: false },
-    { id: "payments" as const, label: "Платежи",    icon: "💳", badge: pendingPaymentsCount || undefined, badgeOrange: true },
+  const NAV = [
+    { id: "analysis" as const, label: "Анализ", icon: BarChart2 },
+    { id: "create" as const, label: "Создать контент", icon: PenLine },
+    { id: "plan" as const, label: "Контент-план", icon: CalendarDays },
+    { id: "calendar" as const, label: "Календарь", icon: Calendar },
   ];
 
-  const PAGE_TITLES: Record<typeof activeTab, string> = {
-    strategy: "Стратегия",
-    content: "Контент-план",
-    tasks: "Сообщения",
-    leads: "Лиды",
-    payments: "Платежи",
-  };
+  // ─── Calendar grid ─────────────────────────────────────────────────────────
+
+  const calMonthEntries = calEntries.filter(e => e.scheduled_date?.startsWith(calMonth));
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  // ─── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <>
     <div className="d-layout">
-
-      {/* ── SIDEBAR ──────────────────────────────────────────── */}
+      {/* Sidebar */}
       <aside className="d-sidebar">
         <div className="d-brand">
-          <p className="text-[13px] font-bold leading-tight" style={{ color: "var(--text)" }}>Культура движения</p>
-          <p className="text-[10px] mt-0.5" style={{ color: "var(--muted)" }}>VK Analytics</p>
+          <p className="text-[13px] font-bold tracking-tight" style={{ color: "var(--text)" }}>Культура движения</p>
+          <p className="text-[10px] mt-0.5" style={{ color: "var(--muted)" }}>Контент-стратег</p>
         </div>
-
-        <span className="d-nav-section">Аналитика</span>
-        {NAV_ITEMS.slice(0, 2).map(item => (
-          <button key={item.id} onClick={() => setActiveTab(item.id)} className={`d-nav-item ${activeTab === item.id ? "active" : ""}`}>
-            <span className="text-[14px]">{item.icon}</span>
-            {item.label}
+        {NAV.map(({ id, label, icon: Icon }) => (
+          <button key={id} onClick={() => setActiveTab(id)} className={`d-nav-item ${activeTab === id ? "active" : ""}`}>
+            <Icon size={14} />
+            {label}
           </button>
         ))}
-
-        <span className="d-nav-section">Работа</span>
-        {NAV_ITEMS.slice(2).map(item => (
-          <button key={item.id} onClick={() => setActiveTab(item.id)} className={`d-nav-item ${activeTab === item.id ? "active" : ""}`}>
-            <span className="text-[14px]">{item.icon}</span>
-            {item.label}
-            {item.badge ? (
-              <span className="d-nav-badge" style={{ background: item.badgeOrange ? "var(--accent-orange)" : "var(--text)", color: "#fff" }}>
-                {item.badge}
-              </span>
-            ) : null}
-          </button>
-        ))}
-
-        <div className="d-sidebar-bottom">
-          {lastSyncFormatted && (
-            <div className="px-2 mb-3">
-              <div className="flex items-center gap-1.5 text-[10px]" style={{ color: "var(--muted)" }}>
-                <CheckCircle size={10} className="text-green-500 flex-shrink-0" />
-                {lastSyncFormatted}
-              </div>
-              {badge && badge.newCount > 0 && (
-                <div className="text-[10px] mt-1 font-medium text-green-600">+{badge.newCount} новых · ~{badge.updatedCount} обновлено</div>
-              )}
-            </div>
-          )}
-          {total > 0 && (
-            <button onClick={() => setShowClearConfirm(true)} className="d-nav-item text-[11px]" style={{ color: "var(--muted)" }}>
-              <Trash2 size={13} /> Очистить кеш
-            </button>
-          )}
-          <button
-            onClick={async () => { await fetch("/api/auth/signout", { method: "POST" }); window.location.href = "/login"; }}
-            className="d-nav-item text-[11px]" style={{ color: "var(--muted)" }}
-          >
-            <X size={13} /> Выйти
-          </button>
-        </div>
       </aside>
 
-      {/* ── MAIN ─────────────────────────────────────────────── */}
+      {/* Main */}
       <main className="d-main">
 
-        {/* Top bar */}
-        <div className="d-topbar">
+        {/* ── Analysis Tab ──────────────────────────────────────────────────── */}
+        {activeTab === "analysis" && (
           <div>
-            <h1 className="text-[20px] font-extrabold tracking-[-0.5px]" style={{ color: "var(--text)" }}>{PAGE_TITLES[activeTab]}</h1>
-            {lastSyncFormatted && (
-              <p className="text-[11px] mt-0.5 flex items-center gap-1" style={{ color: "var(--muted)" }}>
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500"></span>
-                Обновлено {lastSyncFormatted}
-              </p>
-            )}
-          </div>
-          {isAdmin && (
-            <div className="flex items-center gap-2">
-              <button onClick={() => setShowFullConfirm(true)} disabled={loading} className="d-btn d-btn-secondary">
-                <RotateCcw size={13} />
-                <span className="hidden sm:inline">Пересчитать</span>
-              </button>
-              <button onClick={handleSmartRefresh} disabled={loading} className="d-btn d-btn-primary">
-                <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
-                {loading ? "Загрузка..." : "Обновить"}
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Error */}
-        {error && (
-          <div className="rounded-xl p-4 mb-5 text-sm" style={{ background: "#fff0f0", border: "1px solid #fecaca", color: "#dc2626" }}>{error}</div>
-        )}
-
-        {/* Loading progress */}
-        {loading && (
-          <div className="d-card p-6 mb-5">
-            <div className="flex items-center gap-2 mb-4">
-              <RefreshCw size={15} className="animate-spin" style={{ color: "var(--muted)" }} />
-              <p className="text-sm font-medium" style={{ color: "var(--text)" }}>Обновление данных...</p>
-            </div>
-            {progress && (
-              <div className="space-y-1">
-                {[1, 2, 3].map(step => {
-                  const isDone = step < progress.step;
-                  const isCurrent = step === progress.step;
-                  const label = step === 1
-                    ? (progress.step > 1 ? "✓ Сканирование завершено" : progress.label)
-                    : step === 2
-                    ? (progress.step > 2 ? "✓ Диалоги загружены" : isCurrent ? progress.label : "Загрузка диалогов...")
-                    : isCurrent ? progress.label : "Анализ и инсайты...";
-                  if (isDone) return (
-                    <div key={step} className="flex items-center gap-2 text-sm text-green-600 py-1">
-                      <CheckCircle size={13} /><span>{label}</span>
-                    </div>
-                  );
-                  if (isCurrent) {
-                    const prog = progress.total > 0 ? progress.current / progress.total : 0;
-                    return (
-                      <div key={step} className="py-1">
-                        <ProgressBar progress={progress.total > 0 ? prog : 0.3} label={label} eta={progressEta} />
-                        {progress.total > 0 && (
-                          <p className="text-xs mt-0.5" style={{ color: "var(--muted)" }}>
-                            {progress.current} из {progress.total}
-                            {progressEta !== undefined && progressEta > 0 ? ` · ~${progressEta} сек` : ""}
-                          </p>
-                        )}
-                      </div>
-                    );
-                  }
-                  return (
-                    <div key={step} className="flex items-center gap-2 text-sm py-1" style={{ color: "var(--muted)" }}>
-                      <span className="w-3 h-3 rounded-full border-2 inline-block" style={{ borderColor: "var(--border-solid)" }} />
-                      <span>{label}</span>
-                    </div>
-                  );
-                })}
+            <div className="d-topbar">
+              <div>
+                <h1 className="text-[18px] font-bold tracking-tight">Анализ аудитории</h1>
+                {cache.lastSyncAt > 0 && (
+                  <p className="text-[11px] mt-0.5" style={{ color: "var(--muted)" }}>
+                    Последний анализ: {new Date(cache.lastSyncAt).toLocaleString("ru-RU")}
+                  </p>
+                )}
               </div>
-            )}
-          </div>
-        )}
-
-        {/* Empty state */}
-        {!cache && !loading && !error && (
-          <div className="text-center py-24">
-            <MessageSquare size={44} className="mx-auto mb-4" style={{ color: "var(--muted-light)" }} />
-            <h2 className="text-lg font-semibold mb-2" style={{ color: "var(--muted)" }}>Нажмите «Обновить»</h2>
-            <p className="text-sm" style={{ color: "var(--muted-light)" }}>Загрузим диалоги из ВКонтакте и проанализируем их</p>
-          </div>
-        )}
-
-        {cache && !loading && (
-          <>
-            {/* Stats */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-              <StatCard label="Всего лидов" value={total} color="text-slate-800" />
-              <StatCard label="Горячих" value={hot} sub={total > 0 ? `${Math.round(hot / total * 100)}% базы` : ""} color="text-orange-500" />
-              <StatCard label="Тёплых" value={warm} sub={total > 0 ? `${Math.round(warm / total * 100)}% базы` : ""} color="text-blue-500" />
-              <StatCard label="Холодных" value={cold} sub={total > 0 ? `${Math.round(cold / total * 100)}% базы` : ""} color="text-slate-400" />
+              <button onClick={handleSync} disabled={syncing} className="d-btn d-btn-primary">
+                {syncing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                {syncing ? "Анализируем…" : "Запустить анализ"}
+              </button>
             </div>
 
-            {/* Strategy tab */}
-            {activeTab === "strategy" && insights && (
-              <div className="space-y-5">
-                <div className="d-summary-card text-white">
-                  <div className="flex items-center gap-2 mb-3">
-                    <Lightbulb size={16} className="text-yellow-400" />
-                    <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: "rgba(255,255,255,0.5)" }}>✦ Стратегический вывод</p>
-                  </div>
-                  <p className="text-sm leading-relaxed" style={{ color: "rgba(255,255,255,0.82)" }}>{insights.summary}</p>
+            {progress && <PBar {...progress} />}
+
+            {syncMsg && (
+              <div className="d-card p-3 mb-4 text-[12px]" style={{ color: "var(--muted)" }}>{syncMsg}</div>
+            )}
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+              <StatCard label="Всего диалогов" value={cache.leads.length} color="text-slate-800" />
+              <StatCard label="Горячих" value={hot} color="text-orange-500" />
+              <StatCard label="Тёплых" value={warm} color="text-blue-500" />
+              <StatCard label="Холодных" value={cold} color="text-slate-400" />
+            </div>
+
+            {cache.leads.length === 0 ? (
+              <div className="d-card p-12 text-center">
+                <p className="text-[13px]" style={{ color: "var(--muted)" }}>
+                  Нажмите «Запустить анализ» — система прочитает последние 300 диалогов VK,
+                  новые проанализирует, уже прочитанные пропустит
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="d-card p-5">
+                  <p className="d-section-title">Топ болей аудитории</p>
+                  <ResponsiveContainer width="100%" height={260}>
+                    <BarChart data={topPains} layout="vertical" margin={{ left: 0, right: 20, top: 0, bottom: 0 }}>
+                      <XAxis type="number" hide />
+                      <YAxis
+                        type="category" dataKey="label" width={148}
+                        tick={{ fontSize: 11, fill: "#475569" }}
+                        tickFormatter={s => s.length > 24 ? s.slice(0, 24) + "…" : s}
+                      />
+                      <Tooltip formatter={(v) => [`${v} чел.`, "Кол-во"]} />
+                      <Bar dataKey="count" radius={4}>
+                        {topPains.map((_, i) => (
+                          <Cell key={i} fill={i === 0 ? "#f04e00" : i === 1 ? "#ff7a3d" : "#94a3b8"} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
                 </div>
 
-                <div>
-                  <p className="d-section-title">Контент-план</p>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {insights.contentRecommendations.map((rec, i) => <ContentCard key={i} rec={rec} />)}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="d-card p-5">
-                    <div className="d-panel-header"><span className="d-panel-title">Топ болей</span></div>
-                    <ResponsiveContainer width="100%" height={240}>
-                      <BarChart data={insights.topPains} layout="vertical" margin={{ left: 10, right: 20, top: 4, bottom: 4 }}>
-                        <XAxis type="number" tick={{ fontSize: 12 }} />
-                        <YAxis type="category" dataKey="label" width={130} tick={<YTick />} />
-                        <Tooltip />
-                        <Bar dataKey="count" radius={[0, 4, 4, 0]}>
-                          {insights.topPains.map((_, i) => (
-                            <Cell key={i} fill={i === 0 ? "#f97316" : i === 1 ? "#fb923c" : "#fdba74"} />
-                          ))}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-
-                  <div className="d-card p-5">
-                    <div className="d-panel-header"><span className="d-panel-title">Возражения</span></div>
-                    <div className="space-y-3">
-                      {insights.topObjections.map((o, i) => (
+                <div className="d-card p-5">
+                  <p className="d-section-title">Топ возражений</p>
+                  {topObjections.length === 0 ? (
+                    <p className="text-[12px] mt-2" style={{ color: "var(--muted)" }}>Нет данных</p>
+                  ) : (
+                    <div className="space-y-3 mt-2">
+                      {topObjections.map((obj, i) => (
                         <div key={i}>
-                          <div className="flex justify-between text-sm mb-1">
-                            <span style={{ color: "var(--text)" }}>{o.label}</span>
-                            <span className="font-medium" style={{ color: "var(--muted)" }}>{o.count}</span>
+                          <div className="flex justify-between text-[11px] mb-1">
+                            <span style={{ color: "var(--text)" }} className="truncate pr-2">{obj.label}</span>
+                            <span className="font-semibold shrink-0" style={{ color: "var(--muted)" }}>{obj.count}</span>
                           </div>
-                          <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--border-solid)" }}>
+                          <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
                             <div
-                              className="h-full bg-red-400 rounded-full"
-                              style={{ width: `${(o.count / (insights.topObjections[0]?.count || 1)) * 100}%` }}
+                              className="h-full rounded-full bg-slate-600"
+                              style={{ width: `${Math.min((obj.count / (topObjections[0]?.count || 1)) * 100, 100)}%` }}
                             />
                           </div>
                         </div>
                       ))}
                     </div>
-                  </div>
-
-                  <div className="d-card p-5 md:col-span-2">
-                    <div className="d-panel-header">
-                      <span className="d-panel-title flex items-center gap-2">
-                        <MessageSquare size={14} style={{ color: "var(--muted)" }} /> Что спрашивают
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      {insights.topQuestions.map((q, i) => (
-                        <div key={i} className="flex items-center justify-between rounded-xl px-4 py-3" style={{ background: "rgba(0,0,0,0.03)" }}>
-                          <span className="text-sm" style={{ color: "var(--text)" }}>{q.label}</span>
-                          <span className="text-sm font-bold ml-2" style={{ color: "var(--muted)" }}>{q.count}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
+                  )}
                 </div>
-
-                {/* Метрики — вовлечённость и возражения */}
-                {leads.length > 0 && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    {/* Вовлечённость + возражения */}
-                    <div className="space-y-4">
-                      <div className="d-card p-5">
-                        <div className="d-panel-header"><span className="d-panel-title">Вовлечённость (avg сообщений)</span></div>
-                        <div className="space-y-2">
-                          {([["hot", "🔥", "text-orange-500"], ["warm", "🌤", "text-blue-500"], ["cold", "❄️", "text-slate-400"]] as const).map(([s, icon, cls]) => {
-                            const avg = avgMsgsByStatus(s);
-                            const maxAvg = Math.max(avgMsgsByStatus("hot"), avgMsgsByStatus("warm"), avgMsgsByStatus("cold"), 1);
-                            return (
-                              <div key={s}>
-                                <div className="flex justify-between text-sm mb-1">
-                                  <span className={`font-medium ${cls}`}>{icon} {s === "hot" ? "Горячие" : s === "warm" ? "Тёплые" : "Холодные"}</span>
-                                  <span className="font-bold" style={{ color: "var(--text)" }}>{avg} сообщ.</span>
-                                </div>
-                                <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--border-solid)" }}>
-                                  <div className={`h-full rounded-full ${s === "hot" ? "bg-orange-400" : s === "warm" ? "bg-blue-400" : "bg-slate-300"}`}
-                                    style={{ width: `${(avg / maxAvg) * 100}%` }} />
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      <div className="d-card p-5">
-                        <div className="d-panel-header"><span className="d-panel-title">Возражения</span></div>
-                        <div className="flex gap-4 mb-3">
-                          <div className="flex-1 text-center">
-                            <div className="text-2xl font-bold text-green-500">{noObjCount}</div>
-                            <div className="text-xs mt-0.5" style={{ color: "var(--muted)" }}>без возражений</div>
-                          </div>
-                          <div className="flex-1 text-center">
-                            <div className="text-2xl font-bold text-red-400">{withObjCount}</div>
-                            <div className="text-xs mt-0.5" style={{ color: "var(--muted)" }}>с возражениями</div>
-                          </div>
-                        </div>
-                        <div className="h-2.5 rounded-full overflow-hidden flex" style={{ background: "var(--border-solid)" }}>
-                          <div className="h-full bg-green-400 rounded-l-full transition-all"
-                            style={{ width: `${total > 0 ? (noObjCount / total) * 100 : 0}%` }} />
-                          <div className="h-full bg-red-300 rounded-r-full transition-all"
-                            style={{ width: `${total > 0 ? (withObjCount / total) * 100 : 0}%` }} />
-                        </div>
-                        <div className="text-xs mt-1 text-right" style={{ color: "var(--muted-light)" }}>
-                          {total > 0 ? Math.round((noObjCount / total) * 100) : 0}% без возражений
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Топ интересов */}
-                    {interestData.length > 0 && (
-                      <div className="d-card p-5">
-                        <div className="d-panel-header"><span className="d-panel-title">Топ интересов</span></div>
-                        <ResponsiveContainer width="100%" height={Math.max(160, interestData.length * 36)}>
-                          <BarChart data={interestData} layout="vertical" margin={{ left: 10, right: 24, top: 2, bottom: 2 }}>
-                            <XAxis type="number" tick={{ fontSize: 12 }} />
-                            <YAxis type="category" dataKey="label" width={130} tick={<YTick />} />
-                            <Tooltip />
-                            <Bar dataKey="count" radius={[0, 4, 4, 0]}>
-                              {interestData.map((_, i) => (
-                                <Cell key={i} fill={i === 0 ? "#10b981" : i === 1 ? "#34d399" : "#6ee7b7"} />
-                              ))}
-                            </Bar>
-                          </BarChart>
-                        </ResponsiveContainer>
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             )}
-
-            {/* Сегменты аудитории */}
-            {activeTab === "strategy" && leads.length > 0 && (() => {
-              // Группируем лидов по mainPain
-              const segmentMap: Record<string, CachedLead[]> = {};
-              for (const l of leads) {
-                if (l.mainPain) {
-                  if (!segmentMap[l.mainPain]) segmentMap[l.mainPain] = [];
-                  segmentMap[l.mainPain].push(l);
-                }
-              }
-              const segments = Object.entries(segmentMap)
-                .sort((a, b) => b[1].length - a[1].length)
-                .slice(0, 6)
-                .map(([pain, group]) => {
-                  const hot = group.filter(l => l.status === "hot").length;
-                  const warm = group.filter(l => l.status === "warm").length;
-                  const cold = group.length - hot - warm;
-                  const interestFreq: Record<string, number> = {};
-                  for (const l of group) {
-                    for (const i of l.interests ?? []) {
-                      const key = i.toLowerCase();
-                      interestFreq[key] = (interestFreq[key] ?? 0) + 1;
-                    }
-                  }
-                  const topInterests = Object.entries(interestFreq).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([i]) => i);
-                  const productFreq: Record<string, number> = {};
-                  for (const l of group) {
-                    if (l.recommendedProduct) productFreq[l.recommendedProduct] = (productFreq[l.recommendedProduct] ?? 0) + 1;
-                  }
-                  const topProduct = Object.entries(productFreq).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
-                  return { pain, count: group.length, hot, warm, cold, topInterests, topProduct, leads: group };
-                });
-
-              const handleSegmentContent = async (seg: typeof segments[0]) => {
-                setSegmentGenerating(seg.pain);
-                try {
-                  const topPains = [{
-                    pain: seg.pain,
-                    count: seg.count,
-                    hot: seg.hot,
-                    warm: seg.warm,
-                    cold: seg.cold,
-                    topProduct: seg.topProduct,
-                    topInterests: seg.topInterests,
-                  }];
-                  const objMap: Record<string, number> = {};
-                  for (const l of seg.leads) {
-                    for (const o of l.objections ?? []) objMap[o] = (objMap[o] ?? 0) + 1;
-                  }
-                  const topObjections = Object.entries(objMap).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([objection, count]) => {
-                    const hot = seg.leads.filter(l => l.objections?.includes(objection) && l.status === "hot").length;
-                    return { objection, count, hot };
-                  });
-                  const res = await fetch("/api/content-strategy", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ topPains, topObjections }),
-                  });
-                  const data = await res.json();
-                  if (data.contentIdeas) {
-                    setSegmentIdeas(prev => ({ ...prev, [seg.pain]: data.contentIdeas }));
-                  }
-                } catch {}
-                setSegmentGenerating(null);
-              };
-
-              return (
-                <div className="space-y-4">
-                  <h2 className="text-[14px] font-bold" style={{ color: "var(--text)" }}>Сегменты аудитории</h2>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {segments.map(seg => {
-                      const isGenerating = segmentGenerating === seg.pain;
-                      const ideas = segmentIdeas[seg.pain];
-                      return (
-                        <div key={seg.pain} className="d-card overflow-hidden">
-                          <div className="p-4">
-                            {/* Название сегмента */}
-                            <p className="font-semibold text-slate-800 text-sm leading-snug mb-2">{seg.pain}</p>
-
-                            {/* Счётчики статусов */}
-                            <div className="flex items-center gap-2 mb-3">
-                              <span className="text-xs font-medium text-slate-500">{seg.count} лидов</span>
-                              {seg.hot > 0 && <span className="text-xs bg-orange-100 text-orange-700 border border-orange-200 rounded-full px-2 py-0.5 font-medium">🔥 {seg.hot}</span>}
-                              {seg.warm > 0 && <span className="text-xs bg-blue-100 text-blue-700 border border-blue-200 rounded-full px-2 py-0.5 font-medium">🌤 {seg.warm}</span>}
-                              {seg.cold > 0 && <span className="text-xs bg-slate-100 text-slate-500 border border-slate-200 rounded-full px-2 py-0.5 font-medium">❄️ {seg.cold}</span>}
-                            </div>
-
-                            {/* Интересы */}
-                            {seg.topInterests.length > 0 && (
-                              <div className="flex flex-wrap gap-1 mb-3">
-                                {seg.topInterests.map((i, idx) => (
-                                  <span key={idx} className="text-xs rounded-full px-2 py-0.5" style={{ background: "rgba(0,0,0,0.04)", border: "1px solid var(--border)", color: "var(--muted)" }}>{i}</span>
-                                ))}
-                              </div>
-                            )}
-
-                            {/* Продукт */}
-                            {seg.topProduct && (
-                              <p className="text-xs text-slate-400 mb-3">Продукт: <span className="text-slate-600 font-medium">{normalizeProduct(seg.topProduct)}</span></p>
-                            )}
-
-                            {/* Кнопка */}
-                            {isAdmin && (
-                              <button
-                                onClick={() => handleSegmentContent(seg)}
-                                disabled={!!segmentGenerating}
-                                className="d-btn d-btn-secondary w-full justify-center text-xs disabled:opacity-50"
-                              >
-                                <Lightbulb size={12} className={isGenerating ? "animate-pulse text-yellow-500" : ""} />
-                                {isGenerating ? "Генерирую..." : ideas ? "Обновить контент" : "Создать контент"}
-                              </button>
-                            )}
-                          </div>
-
-                          {/* Сгенерированные идеи */}
-                          {ideas && ideas.length > 0 && (
-                            <div className="p-3 space-y-2" style={{ borderTop: "1px solid var(--border)", background: "rgba(0,0,0,0.02)" }}>
-                              {ideas.slice(0, 3).map((idea, i) => {
-                                const cfg = PRIORITY_CONFIG[idea.priority];
-                                const Icon = cfg.icon;
-                                return (
-                                  <div key={i} className="rounded-lg p-3" style={{ background: "var(--surface-solid)", border: "1px solid var(--border)" }}>
-                                    <div className="flex items-center gap-1.5 mb-1">
-                                      <Icon size={12} className={cfg.color} />
-                                      <span className={`text-xs font-semibold px-1.5 py-0.5 rounded-full ${cfg.badge}`}>{cfg.label}</span>
-                                      <span className="text-xs text-slate-400 ml-auto">{idea.platform}</span>
-                                    </div>
-                                    <p className="text-xs font-medium text-slate-800 leading-snug">{idea.title}</p>
-                                    {idea.hook && <p className="text-xs text-slate-400 italic mt-1">«{idea.hook}»</p>}
-                                  </div>
-                                );
-                              })}
-                              {ideas.length > 3 && (
-                                <p className="text-xs text-slate-400 text-center">+ ещё {ideas.length - 3} идей во вкладке «Контент»</p>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })()}
-
-            {activeTab === "strategy" && !insights && (
-              <div className="text-center py-12 text-slate-400 text-sm">Нет данных для стратегии</div>
-            )}
-
-            {/* Content Strategy tab */}
-            {activeTab === "content" && (() => {
-              const contentIdeas = insights?.contentIdeas ?? [];
-              const PLATFORM_FILTER = ["Все", "ВКонтакте", "YouTube", "Instagram"] as const;
-              type PlatformFilter = typeof PLATFORM_FILTER[number];
-              const platformFilter = (activePainIndex === 0 ? "Все" : activePainIndex === 1 ? "ВКонтакте" : activePainIndex === 2 ? "YouTube" : "Instagram") as PlatformFilter;
-              const filtered = platformFilter === "Все" ? contentIdeas : contentIdeas.filter(c => c.platform === platformFilter);
-
-              const PLATFORM_STYLE: Record<string, { badge: string; dot: string }> = {
-                "ВКонтакте": { badge: "bg-blue-100 text-blue-700", dot: "bg-blue-500" },
-                "YouTube":   { badge: "bg-red-100 text-red-700",  dot: "bg-red-500" },
-                "Instagram": { badge: "bg-purple-100 text-purple-700", dot: "bg-purple-500" },
-              };
-
-              if (!insights || contentIdeas.length === 0) {
-                return (
-                  <div className="text-center py-16">
-                    <Lightbulb size={32} className="mx-auto mb-3 text-slate-300" />
-                    <p className="text-slate-500 font-medium mb-1">Нет данных контент-плана</p>
-                    <p className="text-sm text-slate-400 mb-4">
-                      {cache?.leads.length ? "Нажмите «Обновить стратегию» чтобы сгенерировать идеи" : "Сначала загрузите лидов через «Обновить данные»"}
-                    </p>
-                    {cache?.leads.length && isAdmin ? (
-                      <button
-                        onClick={handleRefreshStrategy}
-                        disabled={refreshingStrategy}
-                        className="inline-flex items-center gap-2 bg-slate-900 text-white px-4 py-2 rounded-xl text-sm font-medium hover:bg-slate-700 disabled:opacity-50"
-                      >
-                        <RefreshCw size={14} className={refreshingStrategy ? "animate-spin" : ""} />
-                        {refreshingStrategy ? "Генерирую..." : "Обновить стратегию"}
-                      </button>
-                    ) : null}
-                  </div>
-                );
-              }
-
-              return (
-                <div className="space-y-5">
-                  {/* Header */}
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h2 className="text-[16px] font-bold" style={{ color: "var(--text)" }}>Контент-план</h2>
-                      <p className="text-sm mt-0.5" style={{ color: "var(--muted)" }}>{contentIdeas.length} идей на основе реальных болей клиентов</p>
-                    </div>
-                    {isAdmin && (
-                      <button
-                        onClick={handleRefreshStrategy}
-                        disabled={refreshingStrategy}
-                        className="d-btn d-btn-secondary disabled:opacity-50"
-                      >
-                        <RefreshCw size={13} className={refreshingStrategy ? "animate-spin" : ""} />
-                        {refreshingStrategy ? "Генерирую..." : "Обновить"}
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Platform filter */}
-                  <div className="overflow-x-auto -mx-4 sm:mx-0 px-4 sm:px-0 scrollbar-hide">
-                  <div className="flex gap-2 w-max sm:w-auto">
-                    {PLATFORM_FILTER.map((p, i) => (
-                      <button
-                        key={p}
-                        onClick={() => setActivePainIndex(i)}
-                        className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${activePainIndex === i ? "d-btn-primary" : ""}`}
-                        style={activePainIndex !== i ? { background: "var(--surface-solid)", color: "var(--muted)", border: "1px solid var(--border-solid)" } : {}}
-                      >
-                        {p}
-                        {p !== "Все" && (
-                          <span className="ml-1.5 text-xs opacity-60">{contentIdeas.filter(c => c.platform === p).length}</span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                  </div>
-
-                  {/* Cards grid */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {filtered.map((idea, i) => {
-                      const cfg = PRIORITY_CONFIG[idea.priority];
-                      const Icon = cfg.icon;
-                      const ps = PLATFORM_STYLE[idea.platform] ?? { badge: "bg-slate-100 text-slate-600", dot: "bg-slate-400" };
-                      return (
-                        <div key={i} className="d-card p-4">
-                          <div className="flex items-start justify-between gap-2 mb-2">
-                            <div className="flex items-center gap-1.5">
-                              <Icon size={14} className={cfg.color} />
-                              <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${cfg.badge}`}>{cfg.label}</span>
-                            </div>
-                            <span className="text-xs text-slate-500 whitespace-nowrap shrink-0">{idea.leadsCount} лидов</span>
-                          </div>
-                          <p className="font-semibold text-sm leading-snug mb-2" style={{ color: "var(--text)" }}>{idea.title}</p>
-                          {idea.hook && <p className="text-xs italic mb-3" style={{ color: "var(--muted)" }}>«{idea.hook}»</p>}
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${ps.badge}`}>{idea.platform}</span>
-                            <span className="text-xs rounded px-2 py-0.5" style={{ background: "var(--surface-solid)", border: "1px solid var(--border-solid)", color: "var(--text)" }}>{idea.format}</span>
-                            <span className="text-xs truncate" style={{ color: "var(--muted)" }}>Боль: {idea.pain}</span>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* Tasks tab */}
-            {activeTab === "tasks" && (
-              <div className="space-y-3">
-                {leads.length === 0 && (
-                  <div className="text-center py-12 text-slate-400 text-sm">Нет данных. Запустите обновление.</div>
-                )}
-                {(["hot", "warm"] as const).map(status => {
-                  const group = leads
-                    .filter(l => l.status === status)
-                    .sort((a, b) => a.objections.length - b.objections.length);
-                  if (!group.length) return null;
-                  const cfg = STATUS_CONFIG[status];
-                  const CfgIcon = cfg.icon;
-                  return (
-                    <div key={status}>
-                      <div className={`flex items-center gap-2 mb-2 mt-4 ${cfg.color}`}>
-                        <CfgIcon size={16} />
-                        <span className="font-semibold">{cfg.label} — {group.length} лидов</span>
-                      </div>
-                      <div className="space-y-2">
-                        {group.map((lead, i) => (
-                          <div key={lead.id} className="d-card overflow-hidden">
-                            {/* Header */}
-                            <div className="px-4 py-3" style={{ borderBottom: "1px solid var(--border)" }}>
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <span className="text-slate-400 text-sm font-mono shrink-0">{i + 1}.</span>
-                                  <span className="font-semibold text-slate-800 truncate">{lead.userName}</span>
-                                </div>
-                                <div className="flex items-center gap-1.5 shrink-0">
-                                  {lead.objections.length === 0 && (
-                                    <span className="hidden sm:inline text-xs bg-green-50 text-green-600 border border-green-200 px-2 py-0.5 rounded-full font-medium">без возражений</span>
-                                  )}
-                                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium border ${cfg.pill}`}>{cfg.label}</span>
-                                </div>
-                              </div>
-                              <div className="flex items-center gap-2 mt-1 pl-6">
-                                <span className="text-xs text-slate-400">{lead.lastDate} · {lead.messageCount} сообщ.</span>
-                                {lead.objections.length === 0 && (
-                                  <span className="sm:hidden text-xs bg-green-50 text-green-600 border border-green-200 px-2 py-0.5 rounded-full font-medium">без возражений</span>
-                                )}
-                              </div>
-                            </div>
-
-                            {/* Dosier body */}
-                            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-
-                              {/* Контекст */}
-                              <div className="md:col-span-2 rounded-lg px-3 py-2" style={{ background: "rgba(0,0,0,0.03)" }}>
-                                <div className="text-xs mb-1 uppercase tracking-wide font-medium" style={{ color: "var(--muted-light)" }}>Контекст диалога</div>
-                                <div style={{ color: "var(--text)" }}>{lead.summary}</div>
-                              </div>
-
-                              {/* Боль */}
-                              <div className="bg-orange-50 rounded-lg px-3 py-2">
-                                <div className="text-xs text-orange-400 mb-1 uppercase tracking-wide font-medium">Главная боль</div>
-                                <div className="text-orange-800 font-medium">{lead.mainPain}</div>
-                              </div>
-
-                              {/* Продукт */}
-                              <div className="bg-blue-50 rounded-lg px-3 py-2">
-                                <div className="text-xs text-blue-400 mb-1 uppercase tracking-wide font-medium">Предложить продукт</div>
-                                <div className="text-blue-800 font-bold">{normalizeProduct(lead.recommendedProduct)}</div>
-                              </div>
-
-                              {/* Интересы */}
-                              {lead.interests.length > 0 && (
-                                <div className="bg-emerald-50 rounded-lg px-3 py-2">
-                                  <div className="text-xs text-emerald-500 mb-1.5 uppercase tracking-wide font-medium">Интересы</div>
-                                  <div className="flex flex-wrap gap-1">
-                                    {lead.interests.map((t, ti) => (
-                                      <span key={ti} className="text-xs text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full" style={{ background: "var(--surface-solid)" }}>{t}</span>
-                                    ))}
-                                  </div>
-                                </div>
-                              )}
-
-                              {/* Возражения */}
-                              <div className={`rounded-lg px-3 py-2 ${lead.objections.length ? "bg-red-50" : "bg-green-50"}`}>
-                                <div className={`text-xs mb-1.5 uppercase tracking-wide font-medium ${lead.objections.length ? "text-red-400" : "text-green-500"}`}>
-                                  {lead.objections.length ? "Возражения — отработать" : "Возражений нет"}
-                                </div>
-                                {lead.objections.length > 0 ? (
-                                  <div className="flex flex-wrap gap-1">
-                                    {lead.objections.map((o, oi) => (
-                                      <span key={oi} className="text-xs text-red-600 border border-red-200 px-2 py-0.5 rounded-full" style={{ background: "var(--surface-solid)" }}>{o}</span>
-                                    ))}
-                                  </div>
-                                ) : (
-                                  <div className="text-xs text-green-700">Можно сразу переходить к офферу</div>
-                                )}
-                              </div>
-
-                              {/* Следующий шаг + добавить платёж */}
-                              <div className="md:col-span-2 pt-3 flex flex-wrap items-center justify-between gap-2" style={{ borderTop: "1px solid var(--border)" }}>
-                                <div className="flex items-start gap-2 flex-1 min-w-0">
-                                  <span className="text-slate-400 text-xs uppercase tracking-wide font-medium shrink-0 pt-0.5">Следующий шаг →</span>
-                                  <span className="text-slate-800 font-medium text-sm">{lead.nextStep}</span>
-                                </div>
-                                {lead.paymentDate ? (
-                                  <span className="text-xs bg-green-50 text-green-700 border border-green-200 px-2 py-1 rounded-lg font-medium shrink-0">
-                                    💳 Платёж {new Date(lead.paymentDate).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
-                                  </span>
-                                ) : (
-                                  <button
-                                    onClick={() => setPaymentForm({ leadId: lead.id, date: "", note: "" })}
-                                    className="text-xs text-slate-400 hover:text-slate-600 border border-slate-200 hover:border-slate-300 px-2 py-1 rounded-lg transition-colors shrink-0"
-                                  >
-                                    + Дата платежа
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* Pipeline tab */}
-            {/* Leads tab */}
-            {activeTab === "leads" && (
-              <div className="space-y-4">
-                {/* Filters */}
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="flex flex-wrap gap-1">
-                    {(["all", "hot", "warm", "cold"] as const).map(s => {
-                      const cfg = s === "all" ? null : STATUS_CONFIG[s];
-                      return (
-                        <button
-                          key={s}
-                          onClick={() => setFilterStatus(s)}
-                          className={`text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors ${
-                            filterStatus === s ? "d-btn-primary" : cfg ? `${cfg.pill} hover:opacity-80` : ""
-                          }`}
-                          style={filterStatus !== s && !cfg ? { background: "var(--surface-solid)", color: "var(--text)", border: "1px solid var(--border-solid)" } : {}}
-                        >
-                          {s === "all" ? `Все (${total})` : `${cfg!.label} (${s === "hot" ? hot : s === "warm" ? warm : cold})`}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  <div className="flex items-center gap-2 rounded-lg px-3 py-1.5 flex-1 min-w-[140px]" style={{ background: "var(--surface-solid)", border: "1px solid var(--border-solid)" }}>
-                    <Search size={14} style={{ color: "var(--muted-light)" }} className="flex-shrink-0" />
-                    <input
-                      type="text"
-                      placeholder="Поиск по имени..."
-                      value={search}
-                      onChange={e => setSearch(e.target.value)}
-                      className="text-sm text-slate-700 outline-none w-full bg-transparent placeholder:text-slate-400"
-                    />
-                  </div>
-
-                  <button
-                    onClick={() => downloadCSV(leads)}
-                    className="d-btn d-btn-secondary text-xs shrink-0"
-                  >
-                    <Download size={13} /> <span className="hidden sm:inline">Экспорт</span> CSV
-                  </button>
-                </div>
-
-                <div className="flex items-center gap-2 text-sm text-slate-500">
-                  <Users size={15} />
-                  <span>{filteredLeads.length} лидов{filterStatus !== "all" || search ? " (фильтр)" : ""}</span>
-                </div>
-
-                {filteredLeads.length === 0 && (
-                  <div className="text-center py-12 text-slate-400 text-sm">Нет лидов по выбранным фильтрам</div>
-                )}
-
-                {(["hot", "warm", "cold"] as const).map(status => {
-                  const group = filteredLeads.filter(l => l.status === status);
-                  if (!group.length) return null;
-                  const cfg = STATUS_CONFIG[status];
-                  const Icon = cfg.icon;
-                  return (
-                    <div key={status}>
-                      <div className={`flex items-center gap-2 mb-2 mt-4 ${cfg.color}`}>
-                        <Icon size={15} />
-                        <span className="text-sm font-semibold">{cfg.label} — {group.length}</span>
-                      </div>
-                      <div className="space-y-2">
-                        {group.map(lead => <LeadCard key={lead.id} lead={lead} />)}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* Payments tab */}
-            {activeTab === "payments" && (() => {
-              const today = new Date(); today.setHours(0, 0, 0, 0);
-              const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
-              const weekEnd = new Date(today); weekEnd.setDate(weekEnd.getDate() + 7);
-
-              const withPayment = leads.filter(l => l.paymentDate && l.paymentStatus !== "paid" && l.paymentStatus !== "cancelled");
-              const overdue = withPayment.filter(l => new Date(l.paymentDate!) < today);
-              const todayTomorrow = withPayment.filter(l => { const d = new Date(l.paymentDate!); return d >= today && d <= tomorrow; });
-              const thisWeek = withPayment.filter(l => { const d = new Date(l.paymentDate!); return d > tomorrow && d <= weekEnd; });
-              const later = withPayment.filter(l => new Date(l.paymentDate!) > weekEnd);
-
-              const updatePaymentStatus = async (leadId: number, status: CachedLead["paymentStatus"]) => {
-                setCache(prev => prev ? {
-                  ...prev,
-                  leads: prev.leads.map(l => l.id === leadId ? { ...l, paymentStatus: status } : l),
-                } : prev);
-                await fetch("/api/db/leads", {
-                  method: "PATCH",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ id: leadId, paymentStatus: status }),
-                });
-              };
-
-              const formatDate = (iso: string) => new Date(iso).toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
-
-              const PaymentCard = ({ lead, urgent }: { lead: CachedLead; urgent?: boolean }) => (
-                <div className="d-card overflow-hidden" style={urgent ? { borderColor: "#f97316" } : {}}>
-                  <div className="p-4">
-                    <div className="flex items-start justify-between gap-2 mb-2">
-                      <div>
-                        <div className="flex items-center gap-2 mb-0.5">
-                          <span className="font-semibold text-slate-800 text-sm">{lead.userName}</span>
-                          {lead.paymentStatus === "contacted" && (
-                            <span className="text-xs bg-blue-100 text-blue-700 border border-blue-200 rounded-full px-2 py-0.5">написали</span>
-                          )}
-                        </div>
-                        <a
-                          href={`https://vk.com/id${lead.id}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-xs text-blue-500 hover:text-blue-700 transition-colors"
-                        >
-                          vk.com/id{lead.id} ↗
-                        </a>
-                      </div>
-                      <div className="text-right shrink-0">
-                        <div className={`text-sm font-bold ${urgent ? "text-orange-600" : "text-slate-700"}`}>
-                          {formatDate(lead.paymentDate!)}
-                        </div>
-                        <div className="text-xs text-slate-400">{normalizeProduct(lead.recommendedProduct)}</div>
-                      </div>
-                    </div>
-
-                    {lead.paymentNote && (
-                      <p className="text-xs italic rounded-lg px-3 py-2 mb-3" style={{ color: "var(--muted)", background: "rgba(0,0,0,0.03)" }}>«{lead.paymentNote}»</p>
-                    )}
-
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => updatePaymentStatus(lead.id, lead.paymentStatus === "contacted" ? "pending" : "contacted")}
-                        className={`flex-1 text-xs py-1.5 rounded-lg border font-medium transition-colors ${
-                          lead.paymentStatus === "contacted"
-                            ? "bg-blue-50 text-blue-700 border-blue-200"
-                            : "text-slate-600 border-slate-200 hover:bg-slate-50"
-                        }`}
-                      >
-                        {lead.paymentStatus === "contacted" ? "✓ Написали" : "Написать"}
-                      </button>
-                      <button
-                        onClick={() => updatePaymentStatus(lead.id, "paid")}
-                        className="flex-1 text-xs py-1.5 rounded-lg border border-green-200 text-green-700 bg-green-50 hover:bg-green-100 font-medium transition-colors"
-                      >
-                        💚 Оплатил
-                      </button>
-                      <button
-                        onClick={() => updatePaymentStatus(lead.id, "cancelled")}
-                        className="text-xs py-1.5 px-3 rounded-lg border border-slate-200 text-slate-400 hover:text-red-500 hover:border-red-200 transition-colors"
-                        title="Не дождались"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-
-              if (withPayment.length === 0) {
-                return (
-                  <div className="text-center py-16">
-                    <p className="text-slate-400 text-sm mb-1">Нет предстоящих платежей</p>
-                    <p className="text-xs text-slate-300">После синхронизации диалогов Claude автоматически найдёт клиентов с обещанием оплаты</p>
-                  </div>
-                );
-              }
-
-              return (
-                <div className="space-y-6">
-                  {overdue.length > 0 && (
-                    <div>
-                      <div className="flex items-center gap-2 mb-3">
-                        <span className="w-2 h-2 rounded-full bg-red-500" />
-                        <h3 className="font-semibold text-red-600 text-sm">Просрочено — {overdue.length}</h3>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {overdue.map(l => <PaymentCard key={l.id} lead={l} urgent />)}
-                      </div>
-                    </div>
-                  )}
-                  {todayTomorrow.length > 0 && (
-                    <div>
-                      <div className="flex items-center gap-2 mb-3">
-                        <span className="w-2 h-2 rounded-full bg-orange-500" />
-                        <h3 className="font-semibold text-orange-600 text-sm">Сегодня–завтра — {todayTomorrow.length}</h3>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {todayTomorrow.map(l => <PaymentCard key={l.id} lead={l} urgent />)}
-                      </div>
-                    </div>
-                  )}
-                  {thisWeek.length > 0 && (
-                    <div>
-                      <div className="flex items-center gap-2 mb-3">
-                        <span className="w-2 h-2 rounded-full bg-yellow-400" />
-                        <h3 className="font-semibold text-slate-700 text-sm">На этой неделе — {thisWeek.length}</h3>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {thisWeek.map(l => <PaymentCard key={l.id} lead={l} />)}
-                      </div>
-                    </div>
-                  )}
-                  {later.length > 0 && (
-                    <div>
-                      <div className="flex items-center gap-2 mb-3">
-                        <span className="w-2 h-2 rounded-full bg-slate-300" />
-                        <h3 className="font-semibold text-slate-500 text-sm">Позже — {later.length}</h3>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {later.map(l => <PaymentCard key={l.id} lead={l} />)}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Архив оплаченных */}
-                  {leads.filter(l => l.paymentStatus === "paid" || l.paymentStatus === "cancelled").length > 0 && (
-                    <details className="group">
-                      <summary className="text-xs text-slate-400 cursor-pointer hover:text-slate-600 select-none">
-                        Архив ({leads.filter(l => l.paymentStatus === "paid" || l.paymentStatus === "cancelled").length})
-                      </summary>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
-                        {leads.filter(l => l.paymentStatus === "paid" || l.paymentStatus === "cancelled").map(l => (
-                          <div key={l.id} className="d-card p-4 opacity-60">
-                            <div className="flex items-center justify-between">
-                              <span className="text-sm font-medium text-slate-600">{l.userName}</span>
-                              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${l.paymentStatus === "paid" ? "bg-green-100 text-green-700" : "bg-slate-200 text-slate-500"}`}>
-                                {l.paymentStatus === "paid" ? "Оплатил" : "Отменён"}
-                              </span>
-                            </div>
-                            <div className="text-xs text-slate-400 mt-1">{normalizeProduct(l.recommendedProduct)} · {l.paymentDate ? formatDate(l.paymentDate) : ""}</div>
-                            <button
-                              onClick={() => updatePaymentStatus(l.id, null)}
-                              className="text-xs text-slate-400 hover:text-slate-600 mt-2 transition-colors"
-                            >
-                              ↩ Вернуть в активные
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </details>
-                  )}
-                </div>
-              );
-            })()}
-          </>
+          </div>
         )}
-      </main>
-    </div>
 
-      {/* Payment form modal */}
-      {paymentForm && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-4">
-          <div className="d-card p-6 max-w-sm w-full" style={{ boxShadow: "0 20px 60px rgba(0,0,0,0.15)" }}>
-            <h3 className="font-bold mb-4" style={{ color: "var(--text)" }}>Добавить дату платежа</h3>
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs text-slate-500 font-medium mb-1 block">Дата платежа</label>
-                <input
-                  type="date"
-                  value={paymentForm.date}
-                  onChange={e => setPaymentForm(prev => prev ? { ...prev, date: e.target.value } : prev)}
-                  className="w-full border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-slate-400 transition-colors"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-500 font-medium mb-1 block">Комментарий (необязательно)</label>
-                <input
-                  type="text"
-                  placeholder="например: оплатит с зарплаты"
-                  value={paymentForm.note}
-                  onChange={e => setPaymentForm(prev => prev ? { ...prev, note: e.target.value } : prev)}
-                  className="w-full border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-slate-400 transition-colors"
-                />
+        {/* ── Create Content Tab ────────────────────────────────────────────── */}
+        {activeTab === "create" && (
+          <div>
+            <div className="d-topbar">
+              <h1 className="text-[18px] font-bold tracking-tight">Создать контент</h1>
+            </div>
+
+            <div className="d-card p-5 mb-5">
+              <p className="d-section-title">Тема или запрос</p>
+              <textarea
+                value={topic}
+                onChange={e => setTopic(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleGenerateCustom(); }}
+                placeholder="Например: боль в пояснице у людей с сидячей работой, как начать заниматься дома с нуля, почему обычный фитнес не помогает при грыже…"
+                rows={3}
+                className="w-full text-[13px] p-3 rounded-xl border resize-none focus:outline-none focus:ring-2 focus:ring-slate-200"
+                style={{ borderColor: "var(--border-solid)", background: "var(--surface-solid)" }}
+              />
+              <div className="flex items-center justify-between mt-3">
+                <p className="text-[11px]" style={{ color: "var(--muted)" }}>
+                  {topPains.length > 0 ? `Контекст: ${cache.leads.length} диалогов, ${topPains.length} болей` : "Для лучшего результата сначала запустите анализ"}
+                </p>
+                <button onClick={handleGenerateCustom} disabled={generatingCustom || !topic.trim()} className="d-btn d-btn-primary">
+                  {generatingCustom ? <Loader2 size={13} className="animate-spin" /> : <PenLine size={13} />}
+                  {generatingCustom ? "Генерируем…" : "Создать контент"}
+                </button>
               </div>
             </div>
-            <div className="flex gap-2 mt-4">
-              <button onClick={() => setPaymentForm(null)} className="d-btn d-btn-secondary flex-1">Отмена</button>
+
+            {customError && <div className="d-card p-4 mb-4 text-[12px] text-red-600">{customError}</div>}
+
+            <div className="space-y-4">
+              {customIdeas.map((idea, i) => (
+                <div key={i} className="d-card p-5">
+                  <div className="flex items-start justify-between gap-3 mb-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[14px] font-semibold leading-snug">{idea.title}</p>
+                      <div className="flex gap-2 mt-2 flex-wrap">
+                        <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${PLATFORM_COLOR[idea.platform] || "bg-slate-100 text-slate-600"}`}>{idea.platform}</span>
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">{idea.format}</span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => openAddModal({ title: idea.title, platform: idea.platform, format: idea.format, content: idea.content, hook: idea.hook })}
+                      className="d-btn d-btn-secondary shrink-0"
+                    >
+                      <Plus size={12} />
+                      В календарь
+                    </button>
+                  </div>
+                  <p className="text-[11px] font-medium mb-3" style={{ color: "var(--muted)" }}>Хук: {idea.hook}</p>
+                  <div className="border-t pt-3" style={{ borderColor: "var(--border)" }}>
+                    <p className="text-[12px] leading-relaxed whitespace-pre-wrap" style={{ color: "var(--text)" }}>{idea.content}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── Content Plan Tab ──────────────────────────────────────────────── */}
+        {activeTab === "plan" && (
+          <div>
+            <div className="d-topbar">
+              <h1 className="text-[18px] font-bold tracking-tight">Контент-план</h1>
+              <div className="flex items-center gap-2 flex-wrap">
+                <input
+                  type="month"
+                  value={planMonth}
+                  onChange={e => setPlanMonth(e.target.value)}
+                  className="text-[12px] px-3 py-2 rounded-xl border focus:outline-none"
+                  style={{ borderColor: "var(--border-solid)", background: "var(--surface-solid)" }}
+                />
+                <button onClick={handleGeneratePlan} disabled={generatingPlan} className="d-btn d-btn-primary">
+                  {generatingPlan ? <Loader2 size={13} className="animate-spin" /> : <CalendarDays size={13} />}
+                  {generatingPlan ? "Генерируем…" : "Создать план"}
+                </button>
+              </div>
+            </div>
+
+            {planError && <div className="d-card p-4 mb-4 text-[12px] text-red-600">{planError}</div>}
+
+            {monthPlan.length === 0 && !generatingPlan && (
+              <div className="d-card p-12 text-center">
+                <p className="text-[13px]" style={{ color: "var(--muted)" }}>
+                  {topPains.length === 0
+                    ? "Сначала запустите анализ диалогов — он нужен для создания плана"
+                    : "Нажмите «Создать план» для генерации контент-плана на месяц"}
+                </p>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              {monthPlan.map((item, i) => (
+                <div key={i} className="d-card p-4 flex items-center gap-4">
+                  <div className="text-[22px] font-black leading-none w-8 text-center shrink-0" style={{ color: "var(--accent-orange)" }}>
+                    {item.day}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[13px] font-semibold leading-snug">{item.title}</p>
+                    <p className="text-[11px] mt-0.5 truncate" style={{ color: "var(--muted)" }}>{item.pain}</p>
+                    <div className="flex gap-1.5 mt-1.5 flex-wrap">
+                      <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${PLATFORM_COLOR[item.platform] || "bg-slate-100 text-slate-600"}`}>{item.platform}</span>
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">{item.format}</span>
+                      {item.type && <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-50 text-slate-500">{TYPE_LABEL[item.type] || item.type}</span>}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => openAddModal(
+                      { title: item.title, platform: item.platform, format: item.format, pain: item.pain, hook: item.hook },
+                      padDay(planMonth, item.day)
+                    )}
+                    className="d-btn d-btn-secondary shrink-0"
+                  >
+                    <Plus size={12} />
+                    В календарь
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── Calendar Tab ──────────────────────────────────────────────────── */}
+        {activeTab === "calendar" && (
+          <div>
+            <div className="d-topbar">
+              <div className="flex items-center gap-2">
+                <button onClick={() => setCalMonth(shiftMonth(calMonth, -1))} className="d-btn d-btn-secondary" style={{ padding: "8px 10px" }}>
+                  <ChevronLeft size={14} />
+                </button>
+                <h1 className="text-[18px] font-bold tracking-tight">{formatMonthLabel(calMonth)}</h1>
+                <button onClick={() => setCalMonth(shiftMonth(calMonth, 1))} className="d-btn d-btn-secondary" style={{ padding: "8px 10px" }}>
+                  <ChevronRight size={14} />
+                </button>
+              </div>
+              <button onClick={() => openAddModal({})} className="d-btn d-btn-primary">
+                <Plus size={13} />
+                Добавить
+              </button>
+            </div>
+
+            {loadingCal ? (
+              <div className="d-card p-12 text-center">
+                <Loader2 size={24} className="animate-spin mx-auto" style={{ color: "var(--muted)" }} />
+              </div>
+            ) : (
+              <>
+                {/* Calendar grid */}
+                <div className="d-card p-4 mb-4">
+                  <div className="grid grid-cols-7 gap-1 mb-2">
+                    {["Пн","Вт","Ср","Чт","Пт","Сб","Вс"].map(d => (
+                      <div key={d} className="text-center text-[10px] font-semibold py-1" style={{ color: "var(--muted)" }}>{d}</div>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-7 gap-1">
+                    {Array.from({ length: getFirstDayOfMonth(calMonth) }).map((_, i) => (
+                      <div key={`empty-${i}`} />
+                    ))}
+                    {Array.from({ length: getDaysInMonth(calMonth) }).map((_, i) => {
+                      const day = i + 1;
+                      const dateStr = padDay(calMonth, day);
+                      const dayEntries = calEntries.filter(e => e.scheduled_date === dateStr);
+                      const isToday = dateStr === todayStr;
+                      return (
+                        <div
+                          key={day}
+                          className={`rounded-xl p-1.5 min-h-[60px] border cursor-pointer transition-colors ${isToday ? "border-orange-300 bg-orange-50" : "border-transparent hover:bg-slate-50"}`}
+                          onClick={() => openAddModal({}, dateStr)}
+                        >
+                          <p className={`text-[11px] font-bold mb-1 ${isToday ? "text-orange-500" : ""}`} style={isToday ? {} : { color: "var(--muted)" }}>{day}</p>
+                          <div className="space-y-0.5">
+                            {dayEntries.slice(0, 2).map(e => (
+                              <div
+                                key={e.id}
+                                onClick={ev => ev.stopPropagation()}
+                                className={`text-[9px] leading-tight px-1.5 py-0.5 rounded-md truncate font-medium ${PLATFORM_COLOR[e.platform || ""] || "bg-slate-100 text-slate-600"}`}
+                                title={e.title}
+                              >
+                                {e.title}
+                              </div>
+                            ))}
+                            {dayEntries.length > 2 && (
+                              <div className="text-[9px] px-1" style={{ color: "var(--muted)" }}>+{dayEntries.length - 2}</div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* List view */}
+                {calMonthEntries.length === 0 ? (
+                  <div className="text-center py-8 text-[12px]" style={{ color: "var(--muted)" }}>
+                    Нет записей на {formatMonthLabel(calMonth)}. Нажмите «Добавить» или используйте кнопки «В календарь» в других разделах.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {calMonthEntries
+                      .sort((a, b) => (a.scheduled_date || "").localeCompare(b.scheduled_date || ""))
+                      .map(entry => (
+                        <div key={entry.id} className="d-card p-4 flex items-center gap-3">
+                          <div className="text-[20px] font-black w-8 text-center shrink-0" style={{ color: "var(--accent-orange)" }}>
+                            {entry.scheduled_date ? parseInt(entry.scheduled_date.split("-")[2]) : "?"}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[13px] font-semibold leading-snug">{entry.title}</p>
+                            <div className="flex gap-1.5 mt-1.5 flex-wrap items-center">
+                              {entry.platform && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${PLATFORM_COLOR[entry.platform] || "bg-slate-100 text-slate-600"}`}>{entry.platform}</span>}
+                              {entry.format && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">{entry.format}</span>}
+                              <select
+                                value={entry.status}
+                                onChange={e => updateStatus(entry.id, e.target.value)}
+                                onClick={e => e.stopPropagation()}
+                                className="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border-none outline-none cursor-pointer"
+                              >
+                                <option value="idea">Идея</option>
+                                <option value="approved">Одобрено</option>
+                                <option value="published">Опубликовано</option>
+                              </select>
+                            </div>
+                            {entry.hook && <p className="text-[11px] mt-1.5 truncate" style={{ color: "var(--muted)" }}>Хук: {entry.hook}</p>}
+                          </div>
+                          <button onClick={() => deleteEntry(entry.id)} className="d-btn d-btn-secondary shrink-0" style={{ padding: "8px 10px", color: "#ef4444" }}>
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </main>
+
+      {/* ── Add-to-Calendar Modal ──────────────────────────────────────────── */}
+      {addModal && (
+        <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="d-card p-6 w-full max-w-md" style={{ background: "var(--surface-solid)" }}>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-[14px] font-bold">Добавить в календарь</h2>
+              <button onClick={() => { setAddModal(null); setAddDate(""); setAddTitle(""); }} style={{ color: "var(--muted)" }}>
+                <X size={16} />
+              </button>
+            </div>
+
+            {!addModal.item.title ? (
+              <div className="mb-3">
+                <label className="text-[11px] font-semibold mb-1.5 block" style={{ color: "var(--muted)" }}>Название</label>
+                <input
+                  value={addTitle}
+                  onChange={e => setAddTitle(e.target.value)}
+                  placeholder="Заголовок контента"
+                  className="w-full text-[13px] p-3 rounded-xl border focus:outline-none focus:ring-2 focus:ring-slate-200"
+                  style={{ borderColor: "var(--border-solid)", background: "var(--surface-solid)" }}
+                />
+              </div>
+            ) : (
+              <p className="text-[12px] mb-4 line-clamp-2" style={{ color: "var(--muted)" }}>{addModal.item.title}</p>
+            )}
+
+            <div className="mb-5">
+              <label className="text-[11px] font-semibold mb-1.5 block" style={{ color: "var(--muted)" }}>Дата публикации</label>
+              <input
+                type="date"
+                value={addDate}
+                onChange={e => setAddDate(e.target.value)}
+                className="w-full text-[13px] p-3 rounded-xl border focus:outline-none"
+                style={{ borderColor: "var(--border-solid)", background: "var(--surface-solid)" }}
+              />
+            </div>
+
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => { setAddModal(null); setAddDate(""); setAddTitle(""); }} className="d-btn d-btn-secondary">Отмена</button>
               <button
-                disabled={!paymentForm.date}
-                onClick={async () => {
-                  if (!paymentForm.date) return;
-                  const { leadId, date, note } = paymentForm;
-                  setCache(prev => prev ? {
-                    ...prev,
-                    leads: prev.leads.map(l => l.id === leadId ? { ...l, paymentDate: date, paymentNote: note || null, paymentStatus: "pending" } : l),
-                  } : prev);
-                  setPaymentForm(null);
-                  await fetch("/api/db/leads", {
-                    method: "PATCH",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ id: leadId, paymentDate: date, paymentNote: note || null, paymentStatus: "pending" }),
-                  });
-                }}
-                className="d-btn d-btn-primary flex-1"
+                onClick={handleAddToCalendar}
+                disabled={addingToCalendar || !addDate || !(addModal.item.title || addTitle.trim())}
+                className="d-btn d-btn-primary"
               >
+                {addingToCalendar ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
                 Сохранить
               </button>
             </div>
           </div>
         </div>
       )}
-
-      {/* Clear cache confirmation */}
-      {showClearConfirm && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-4">
-          <div className="d-card p-6 max-w-sm w-full" style={{ boxShadow: "0 20px 60px rgba(0,0,0,0.15)" }}>
-            <h3 className="font-bold mb-2" style={{ color: "var(--text)" }}>Очистить кеш?</h3>
-            <p className="text-sm mb-4" style={{ color: "var(--muted)" }}>Все сохранённые данные будут удалены. При следующем обновлении придётся анализировать всё заново.</p>
-            <div className="flex gap-2">
-              <button onClick={() => setShowClearConfirm(false)} className="d-btn d-btn-secondary flex-1">Отмена</button>
-              <button
-                onClick={() => { setCache(null); setBadge(null); setShowClearConfirm(false); }}
-                className="d-btn flex-1 bg-red-500 hover:bg-red-600 text-white"
-              >
-                Очистить
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Full refresh confirmation */}
-      {showFullConfirm && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-4">
-          <div className="d-card p-6 max-w-sm w-full" style={{ boxShadow: "0 20px 60px rgba(0,0,0,0.15)" }}>
-            <h3 className="font-bold mb-2" style={{ color: "var(--text)" }}>Пересчитать всё?</h3>
-            <p className="text-sm mb-4" style={{ color: "var(--muted)" }}>Все диалоги будут загружены и проанализированы заново. Это займёт несколько минут и потратит Claude API кредиты.</p>
-            <div className="flex gap-2">
-              <button onClick={() => setShowFullConfirm(false)} className="d-btn d-btn-secondary flex-1">Отмена</button>
-              <button onClick={handleFullRefresh} className="d-btn d-btn-primary flex-1">
-                Пересчитать
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
+    </div>
   );
 }

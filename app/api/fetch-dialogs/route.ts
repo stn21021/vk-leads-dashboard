@@ -28,11 +28,13 @@ export async function GET(request: Request) {
   if (deny) return deny;
   const { searchParams } = new URL(request.url);
   const mode = searchParams.get("mode");
+  const offset = parseInt(searchParams.get("offset") ?? "0", 10);
 
   try {
     const convResponse = await vkRequest("messages.getConversations", {
       group_id: VK_GROUP_ID,
       count: 100,
+      offset,
       filter: "all",
     });
 
